@@ -1,0 +1,13 @@
+*.swp
+__pycache__
+.pytest_cache
+.venv
+*.egg-info
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out
+
+# bi mat / file sinh ra khi lab
+*.env
+setup.html

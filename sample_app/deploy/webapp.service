@@ -1,0 +1,30 @@
+[Unit]
+Description=LogSentinel target web app (Gunicorn, 127.0.0.1:8080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=webapp
+Group=webapp
+WorkingDirectory=/opt/logsentinel/app
+EnvironmentFile=/etc/logsentinel/runtime.env
+EnvironmentFile=/etc/logsentinel/webapp.env
+# Bind loopback: cong 8080 khong bao gio lo ra Internet, ke ca khi SG bi mo nham.
+ExecStart=/opt/logsentinel/venv/bin/gunicorn --workers 4 --bind 127.0.0.1:8080 --timeout 30 'app:create_app()'
+Restart=always
+RestartSec=5s
+
+# Sandbox systemd
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/log/webapp
+
+[Install]
+WantedBy=multi-user.target

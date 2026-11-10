@@ -1,0 +1,3 @@
+pytest==8.4.2
+flask>=3.0,<4
+# pyotp/qrcode/boto3 khong can cho test: test tu thay bang module gia
