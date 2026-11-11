@@ -182,3 +182,68 @@ def test_handler_raises_on_malformed_envelope_so_error_alarm_fires(det):
     # DetectorErrorsAlarm khong bao gio bat. Nay phai nem loi ra ngoai.
     with pytest.raises(Exception):
         det.handler({"bad": 1}, None)
+
+
+# ------------------------------------------------ Telegram: dinh dang de doc
+def _telegram_body(det):
+    return json.loads(det.urllib.request.urlopen.call_args.args[0].data)
+
+
+def test_telegram_message_is_laid_out_for_a_phone_screen(det):
+    _secret(det)
+    with mock.patch.object(det.urllib.request, "urlopen"):
+        det.send_telegram_alert("CRITICAL", "SQL_INJECTION",
+                                {"client_ip": "203.0.113.5", "username": "admin", "payload": "1 OR 1=1"},
+                                "inc-42", "2026-11-11T08:30:00+00:00")
+        body = _telegram_body(det)
+    lines = body["text"].split("\n")
+    assert body["parse_mode"] == "HTML"
+    assert "<b>CRITICAL</b>" in lines[0] and "<b>SQL_INJECTION</b>" in lines[0]
+    assert "2026-11-11 08:30:00 UTC" in body["text"]
+    assert "IP: <code>203.0.113.5</code>" in body["text"]
+    assert "payload: <code>1 OR 1=1</code>" in body["text"]
+    assert "<code>inc-42</code>" in lines[-1]
+    assert "{" not in body["text"]            # khong con do JSON tho vao tin nhan
+
+
+def _send(det, details, rule="SQL_INJECTION"):
+    _secret(det)
+    with mock.patch.object(det.urllib.request, "urlopen"):
+        det.send_telegram_alert("CRITICAL", rule, details, "inc-1", "2026-11-11T08:30:00+00:00")
+        return _telegram_body(det)
+
+
+def _only_known_tags(text):
+    import re
+    return set(re.findall(r"</?([a-zA-Z]+)", text)) <= {"b", "code"}
+
+
+def test_attacker_text_cannot_inject_markup_into_the_telegram_message(det):
+    """Telegram tu choi tin co the HTML hong (400) -> mat canh bao. Ke tan cong khong duoc lam duoc dieu do."""
+    body = _send(det, {"client_ip": "203.0.113.5",
+                       "payload": "<b>ok</b><a href='http://evil'>x</a></code><script>&unknown;",
+                       "<i>key": "v"}, rule="<u>RULE")
+    text = body["text"]
+    assert _only_known_tags(text)
+    assert "&lt;script&gt;" in text and "&amp;unknown;" in text and "&lt;u&gt;RULE" in text
+    assert text.count("<code>") == text.count("</code>") and text.count("<b>") == text.count("</b>") == 2
+
+
+def test_huge_or_many_fields_still_produce_a_valid_message_within_the_limit(det):
+    import re
+    details = {f"field{i}": "<&>" * 5000 for i in range(40)}
+    details["client_ip"] = "203.0.113.5"
+    text = _send(det, details)["text"]
+    assert len(text) <= det.TELEGRAM_MAX_CHARS
+    assert text.count("<code>") == text.count("</code>")
+    assert not re.search(r"&(?!amp;|lt;|gt;)", text)          # khong co thuc the bi cat ngang
+    assert "(+32 truong khac" in text and "IP: <code>203.0.113.5</code>" in text
+
+
+def test_non_dict_details_and_odd_timestamp_do_not_break_the_alert(det):
+    body = _send(det, None)
+    assert "<b>CRITICAL</b>" in body["text"]
+    _secret(det)
+    with mock.patch.object(det.urllib.request, "urlopen"):
+        det.send_telegram_alert("HIGH", "R", {"n": 1.5, "nested": {"a": [1, 2]}}, "inc-2", "not-a-date")
+        assert "not-a-date" in _telegram_body(det)["text"]

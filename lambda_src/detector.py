@@ -11,12 +11,13 @@ Kien truc theo "deep module": moi khoi duoi day co giao dien nho, che giau chi t
       record_incident(rule, sev, details, raw)   <- Incident sink: DynamoDB + metric + SNS + Telegram
       auto_block_attacker_ip(ip, reason)         <- SOAR: ghi BLOCKED_IP#<ip> (idempotent, TTL 24h)
       count_failed_login(ip)                     <- State: bo dem brute-force nguyen tu (60s)
-
+      ######################################################################################
 Quy uoc: rule chi QUYET DINH, khong goi AWS truc tiep. Moi loi I/O deu bi chan tai sink,
 nen mot dich vu hong (Telegram, SNS) khong bao gio lam mat ban ghi su co.
 """
 import base64
 import gzip
+import html
 import ipaddress
 import json
 import os
@@ -31,7 +32,6 @@ import boto3
 dynamodb = boto3.resource("dynamodb")
 sns = boto3.client("sns")
 secrets = boto3.client("secretsmanager")
-
 TABLE_NAME = os.environ.get("INCIDENT_TABLE", "")
 SNS_TOPIC_ARN = os.environ.get("SNS_TOPIC_ARN", "")
 SECRET_ARN = os.environ.get("SECRET_ARN", "")
@@ -40,10 +40,25 @@ table = dynamodb.Table(TABLE_NAME) if TABLE_NAME else None
 APP_LOG_GROUP = "/logsentinel/sample-app"
 TRAIL_LOG_GROUP = "/logsentinel/cloudtrail"
 
-INCIDENT_TTL_S = 7 * 86400
+INCIDENT_TTL_S = 30 * 86400  # bang thoi gian luu log (LOG_RETENTION_DAYS) de su co va log goc het han cung luc
 BLOCK_TTL_S = 86400
 BRUTE_FORCE_WINDOW_S = 60
 BRUTE_FORCE_THRESHOLD = 5
+# Brute-force cham tu 1 IP (moi lan doan cach nhau du lau de ne cua so 60s o tren).
+SLOW_BRUTE_FORCE_WINDOW_S = 3600
+SLOW_BRUTE_FORCE_THRESHOLD = 20
+# Brute-force phan tan vao 1 tai khoan (nhieu IP, moi IP duoi nguong tren).
+ACCOUNT_ATTACK_WINDOW_S = 300
+ACCOUNT_ATTACK_THRESHOLD = 10
+# Spike: tong dang nhap sai cua TOAN he thong (nhieu IP x nhieu tai khoan, moi cap chi thu 1 lan).
+LOGIN_SPIKE_WINDOW_S = 300
+LOGIN_SPIKE_THRESHOLD = 50
+# Do quet duong dan: so lan 404 cua 1 IP. Phai bang LOCAL_SCAN_THRESHOLD trong sample_app/app.py.
+SCAN_WINDOW_S = 60
+SCAN_THRESHOLD = 30
+# Doan mat khau AWS Console tu 1 IP.
+CONSOLE_FAIL_WINDOW_S = 300
+CONSOLE_FAIL_THRESHOLD = 5
 MAX_FIELD_CHARS = 512
 METRIC_NAMESPACE = "LogSentinel"
 
@@ -150,6 +165,53 @@ def _get_telegram_config():
     return _telegram_cache["cfg"]
 
 
+_SEVERITY_ICON = {"CRITICAL": chr(0x1F534), "HIGH": chr(0x1F7E0)}   # cham do / cham cam
+TELEGRAM_VALUE_CHARS = 300
+TELEGRAM_MAX_FIELDS = 8
+# Truong quen thuoc dua len dau voi nhan de doc; phan con lai liet ke theo ten truong.
+_TELEGRAM_LABELS = (("client_ip", "IP"), ("ip", "IP"), ("username", "Tai khoan"), ("user", "Tai khoan"),
+                    ("actor", "Nguoi thuc hien"), ("action", "Hanh dong"))
+_TELEGRAM_SKIP = {"timestamp", "source", "event_type", "severity"} | {k for k, _ in _TELEGRAM_LABELS}
+
+
+def _tg(value, limit: int = TELEGRAM_VALUE_CHARS) -> str:
+    """
+    Gia tri -> van ban an toan cho parse_mode HTML cua Telegram. Du lieu do ke tan cong nhap (payload, username)
+    khong the chen the HTML hay lam hong tin nhan. Cat TRUOC khi escape de khong cat ngang mot thuc the (&amp;).
+    """
+    raw = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    escaped = html.escape(raw[:limit], quote=False)
+    if len(escaped) > limit:   # toan ky tu phai escape: moi ky tu no ra toi da 5 lan
+        escaped = html.escape(raw[:limit // 5], quote=False)
+    return escaped
+
+
+def _telegram_time(now_iso: str) -> str:
+    try:
+        return datetime.fromisoformat(now_iso).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except (TypeError, ValueError):
+        return _tg(now_iso, 40)
+
+
+def _render_telegram(severity: str, rule: str, details: dict, inc_id: str, now_iso: str) -> str:
+    """Tin nhan cho man hinh dien thoai: moi dong mot y, gia tri ky thuat nam trong <code> de cham la sao chep."""
+    details = details if isinstance(details, dict) else {}
+    lines = [f"{_SEVERITY_ICON.get(severity, chr(0x26A0))} <b>{_tg(severity, 20)}</b> | <b>{_tg(rule, 60)}</b>",
+             f"Thoi gian: {_telegram_time(now_iso)}"]
+    seen = set()
+    for key, label in _TELEGRAM_LABELS:
+        if details.get(key) not in (None, "") and label not in seen:
+            seen.add(label)
+            lines.append(f"{label}: <code>{_tg(details[key])}</code>")
+    extra = [k for k in details if k not in _TELEGRAM_SKIP and details[k] not in (None, "")]
+    for key in extra[:TELEGRAM_MAX_FIELDS]:
+        lines.append(f"{_tg(str(key), 40)}: <code>{_tg(details[key])}</code>")
+    if len(extra) > TELEGRAM_MAX_FIELDS:
+        lines.append(f"(+{len(extra) - TELEGRAM_MAX_FIELDS} truong khac, xem SOC Console)")
+    lines.append(f"Ma su co: <code>{_tg(inc_id, 60)}</code>")
+    return "\n".join(lines)
+
+
 def send_telegram_alert(severity: str, rule: str, details: dict, inc_id: str, now_iso: str) -> None:
     """Gui canh bao Telegram. Ngat mach: loi 1 lan thi bo qua phan con lai cua batch."""
     global _telegram_failed_this_run
@@ -159,9 +221,14 @@ def send_telegram_alert(severity: str, rule: str, details: dict, inc_id: str, no
     if not cfg:
         return
     token, chat_id = cfg
-    text = _render_alert(severity, rule, details, inc_id, now_iso)[:TELEGRAM_MAX_CHARS]
+    message = {"chat_id": chat_id, "text": _render_telegram(severity, rule, details, inc_id, now_iso),
+               "parse_mode": "HTML", "disable_web_page_preview": True}
+    if len(message["text"]) > TELEGRAM_MAX_CHARS:
+        # Khong cat ngang chuoi HTML (the dang do se bi Telegram tu choi -> mat canh bao): gui ban van ban thuong.
+        message = {"chat_id": chat_id,
+                   "text": _render_alert(severity, rule, details, inc_id, now_iso)[:TELEGRAM_MAX_CHARS]}
     try:
-        body = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+        body = json.dumps(message).encode("utf-8")
         req = urllib.request.Request(
             f"https://api.telegram.org/bot{token}/sendMessage",
             data=body,
@@ -178,7 +245,7 @@ def send_telegram_alert(severity: str, rule: str, details: dict, inc_id: str, no
 
 # =========================================================== Incident sink
 def _render_alert(severity: str, rule: str, details: dict, inc_id: str, now_iso: str) -> str:
-    """Mot dinh dang duy nhat cho moi kenh (SNS email, Telegram)."""
+    """Van ban thuong: noi dung email SNS, va ban du phong cho Telegram khi tin HTML qua dai (_render_telegram)."""
     return (
         f"[LogSentinel {severity}] {rule}\n"
         f"Thoi gian: {now_iso}\n"
@@ -215,6 +282,7 @@ def record_incident(rule: str, severity: str, details: dict, raw_payload: str) -
             table.put_item(Item={
                 "incident_id": inc_id,
                 "timestamp": now_iso,
+                "record_type": "INCIDENT",  # khoa GSI by_type: SOC Console liet ke ma khong can Scan
                 "rule": rule,
                 "severity": severity,
                 "details": details,
@@ -250,6 +318,7 @@ def auto_block_attacker_ip(ip_address, reason: str) -> bool:
         table.put_item(Item={
             "incident_id": f"BLOCKED_IP#{ip}",
             "timestamp": "ACTIVE",
+            "record_type": "BLOCK",
             "blocked_at": _now_iso(),
             "rule": "ACTIVE_REMEDIATION_BLOCKED",
             "blocked_ip": ip,
@@ -267,14 +336,19 @@ def auto_block_attacker_ip(ip_address, reason: str) -> bool:
 
 # ==================================================== State: brute-force
 def count_failed_login(ip: str) -> int:
-    """
-    Dem so lan dang nhap sai cua 1 IP trong cua so 60 giay, nguyen tu tuyet doi.
+    """Dem so lan dang nhap sai cua 1 IP trong cua so 60 giay."""
+    return count_in_window(f"STATE#FAILED_LOGIN#{ip}", BRUTE_FORCE_WINDOW_S)
 
-    Buoc 1: ADD +1 neu cua so con hieu luc (window_start > now-60).
+
+def count_in_window(state_id: str, window_s: int) -> int:
+    """
+    Bo dem su kien theo cua so thoi gian, nguyen tu tuyet doi (nhieu Lambda chay song song van dung).
+
+    Buoc 1: ADD +1 neu cua so con hieu luc (window_start > now-window).
     Buoc 2: neu cua so het han / chua co -> mo cua so moi (dieu kien nguoc lai), count = 1.
     Buoc 3: neu buoc 2 thua cuoc dua (Lambda khac vua mo cua so) -> quay lai buoc 1.
     """
-    key = {"incident_id": f"STATE#FAILED_LOGIN#{ip}", "timestamp": "WINDOW"}
+    key = {"incident_id": state_id, "timestamp": "WINDOW"}
     names = {"#ttl": "ttl"}
 
     def _increment():
@@ -284,8 +358,8 @@ def count_failed_login(ip: str) -> int:
             UpdateExpression="ADD failure_count :one SET #ttl = :ttl",
             ConditionExpression="window_start > :floor",
             ExpressionAttributeNames=names,
-            ExpressionAttributeValues={":one": 1, ":floor": now - BRUTE_FORCE_WINDOW_S,
-                                       ":ttl": now + 2 * BRUTE_FORCE_WINDOW_S},
+            ExpressionAttributeValues={":one": 1, ":floor": now - window_s,
+                                       ":ttl": now + 2 * window_s},
             ReturnValues="UPDATED_NEW",
         )
         return int(res["Attributes"]["failure_count"])
@@ -303,8 +377,8 @@ def count_failed_login(ip: str) -> int:
             UpdateExpression="SET failure_count = :one, window_start = :now, #ttl = :ttl",
             ConditionExpression="attribute_not_exists(window_start) OR window_start <= :floor",
             ExpressionAttributeNames=names,
-            ExpressionAttributeValues={":one": 1, ":now": now, ":floor": now - BRUTE_FORCE_WINDOW_S,
-                                       ":ttl": now + 2 * BRUTE_FORCE_WINDOW_S},
+            ExpressionAttributeValues={":one": 1, ":now": now, ":floor": now - window_s,
+                                       ":ttl": now + 2 * window_s},
         )
         return 1
     except Exception as exc:
@@ -330,6 +404,21 @@ def evaluate_webapp_log(raw_message: str) -> None:
         record_incident("SQL_INJECTION", "CRITICAL", data, raw_message)
         auto_block_attacker_ip(client_ip, "Phat hien payload SQL Injection / Path Traversal")
 
+    elif event_type == "NOT_FOUND":
+        # Do quet: 1 IP goi nhieu duong dan khong ton tai (/.env, /wp-admin, /phpmyadmin...) trong thoi gian ngan.
+        if not table:
+            return
+        ip = _blockable_ip(client_ip) or str(client_ip)[:64]
+        try:
+            count = count_in_window(f"STATE#NOT_FOUND#{ip}", SCAN_WINDOW_S)
+        except Exception as exc:
+            print(f"[ERROR] Scan state tracking failed: {type(exc).__name__}")
+            return
+        if count == SCAN_THRESHOLD:
+            record_incident("SCAN_DETECTED", "HIGH",
+                            {**data, "attempt_count": count, "window_seconds": SCAN_WINDOW_S}, raw_message)
+            auto_block_attacker_ip(client_ip, f"Do quet: {count} duong dan khong ton tai / {SCAN_WINDOW_S}s")
+
     elif event_type == "FAILED_LOGIN":
         ip = _blockable_ip(client_ip) or str(client_ip)[:64]
         if not table:
@@ -341,15 +430,90 @@ def evaluate_webapp_log(raw_message: str) -> None:
             return
         # Bang dung 1 lan / cua so -> 1 canh bao, khong bao cao canh bao (alert fatigue).
         if count == BRUTE_FORCE_THRESHOLD:
-            data["attempt_count"] = count
-            data["window_seconds"] = BRUTE_FORCE_WINDOW_S
-            record_incident("BRUTE_FORCE_DETECTED", "HIGH", data, raw_message)
+            record_incident("BRUTE_FORCE_DETECTED", "HIGH",
+                            {**data, "attempt_count": count, "window_seconds": BRUTE_FORCE_WINDOW_S}, raw_message)
             auto_block_attacker_ip(client_ip, f"Brute-force: {count} lan sai / {BRUTE_FORCE_WINDOW_S}s")
+        # IP da cham nguong thi da co canh bao rieng o tren: khong tinh tiep vao 2 bo dem THEO IP / TAI KHOAN,
+        # de 1 IP don le khong sinh 2 canh bao cho cung 1 cuoc tan cong.
+        if count < BRUTE_FORCE_THRESHOLD:
+            _track_slow_brute_force(data, ip, client_ip, raw_message)
+            _track_account_under_attack(data, raw_message)
+        # Spike la TONG cua ca he thong: dem moi lan sai, ke ca tu IP da bi khoa (spec: "bat ke IP hay tai khoan").
+        _track_login_failure_spike(data, raw_message)
+
+
+def _track_login_failure_spike(data: dict, raw_message: str) -> None:
+    """
+    SPIKE toan he thong: tong so dang nhap sai tang dot bien, bat ke IP hay tai khoan nao. Bat kieu
+    "credential stuffing" - moi IP va moi tai khoan chi thu 1 lan nen ca hai bo dem kia deu khong thay.
+    Chi canh bao: khong co IP don le nao dang trach.
+    """
+    try:
+        count = count_in_window("STATE#FAILED_LOGIN_GLOBAL", LOGIN_SPIKE_WINDOW_S)
+    except Exception as exc:
+        print(f"[ERROR] Spike state tracking failed: {type(exc).__name__}")
+        return
+    if count == LOGIN_SPIKE_THRESHOLD + 1:   # "vuot 50" = lan thu 51; bang dung 1 lan / cua so -> 1 canh bao
+        record_incident("LOGIN_FAILURE_SPIKE", "HIGH", {
+            "attempt_count": count, "window_seconds": LOGIN_SPIKE_WINDOW_S,
+            "last_ip": data.get("client_ip"), "last_username": data.get("username"),
+        }, raw_message)
+
+
+def _track_slow_brute_force(data: dict, ip: str, client_ip, raw_message: str) -> None:
+    """Brute-force CHAM: 1 lan doan moi phut khong bao gio cham nguong 5 lan/60s -> dem them cua so 1 gio."""
+    try:
+        count = count_in_window(f"STATE#FAILED_LOGIN_SLOW#{ip}", SLOW_BRUTE_FORCE_WINDOW_S)
+    except Exception as exc:
+        print(f"[ERROR] Slow state tracking failed: {type(exc).__name__}")
+        return
+    if count == SLOW_BRUTE_FORCE_THRESHOLD:
+        record_incident("SLOW_BRUTE_FORCE", "HIGH",
+                        {**data, "attempt_count": count, "window_seconds": SLOW_BRUTE_FORCE_WINDOW_S}, raw_message)
+        auto_block_attacker_ip(client_ip, f"Brute-force cham: {count} lan sai / {SLOW_BRUTE_FORCE_WINDOW_S}s")
+
+
+def _track_account_under_attack(data: dict, raw_message: str) -> None:
+    """
+    Brute-force PHAN TAN: nhieu IP, moi IP sai duoi nguong, cung nham 1 tai khoan. Bo dem theo IP khong
+    thay duoc -> dem them theo ten tai khoan. Chi canh bao (khong khoa IP: khoa ai khi co ca tram IP?).
+    """
+    username = str(data.get("username") or "").strip().lower()[:64]
+    if not username or username == "unknown":
+        return
+    try:
+        count = count_in_window(f"STATE#FAILED_LOGIN_USER#{username}", ACCOUNT_ATTACK_WINDOW_S)
+    except Exception as exc:
+        print(f"[ERROR] Account state tracking failed: {type(exc).__name__}")
+        return
+    if count == ACCOUNT_ATTACK_THRESHOLD:
+        record_incident("ACCOUNT_UNDER_ATTACK", "HIGH", {
+            "username": username, "attempt_count": count, "window_seconds": ACCOUNT_ATTACK_WINDOW_S,
+            "last_ip": data.get("client_ip"),
+        }, raw_message)
 
 
 # ========================================================= Rules: CloudTrail
-# Cac hanh dong IAM co the dung de leo thang dac quyen hoac giu quyen truy cap.
-IAM_PRIVILEGE_EVENTS = ("CreateAccessKey", "AttachUserPolicy", "PutUserPolicy")
+# Cac hanh dong IAM co the dung de leo thang dac quyen hoac giu quyen truy cap -> ten luat.
+# Bao phu ca user, role va group: ke tan cong chon duong nao it bi theo doi nhat.
+# PHAI khop voi danh sach tu khoa cua CloudTrailSubscription trong log_sentinel_stack.py
+# (su kien khong co trong filter se khong bao gio toi Lambda).
+IAM_PRIVILEGE_EVENTS = {
+    "CreateAccessKey": "IAM_ACCESS_KEY_CREATED",
+    "AttachUserPolicy": "IAM_POLICY_ATTACHED",
+    "AttachRolePolicy": "IAM_POLICY_ATTACHED",
+    "AttachGroupPolicy": "IAM_POLICY_ATTACHED",
+    "PutUserPolicy": "IAM_INLINE_POLICY_PUT",
+    "PutRolePolicy": "IAM_INLINE_POLICY_PUT",
+    "PutGroupPolicy": "IAM_INLINE_POLICY_PUT",
+    "CreatePolicyVersion": "IAM_POLICY_VERSION_CREATED",   # sua noi dung policy dang duoc gan san
+    "UpdateAssumeRolePolicy": "IAM_TRUST_POLICY_CHANGED",  # cho phep ben ngoai assume role
+    "CreateLoginProfile": "IAM_LOGIN_PROFILE_CHANGED",     # dat mat khau Console cho user khac
+    "UpdateLoginProfile": "IAM_LOGIN_PROFILE_CHANGED",
+    "AddUserToGroup": "IAM_USER_ADDED_TO_GROUP",
+}
+# Vo hieu hoa khoa KMS = lam mu toan bo he thong (CloudTrail va IncidentTable deu ma hoa bang CMK).
+KMS_TAMPER_EVENTS = ("ScheduleKeyDeletion", "DisableKey")
 ADMIN_POLICY_ARN = "arn:aws:iam::aws:policy/AdministratorAccess"
 
 
@@ -366,18 +530,47 @@ def evaluate_cloudtrail_log(raw_message: str) -> None:
 
     # Ghi chu: KHONG auto-block IP o tang CloudTrail vi sourceIPAddress co the la
     # endpoint dich vu AWS (vd "cloudformation.amazonaws.com") -> chi canh bao cho SOC.
-    if event_name == "ConsoleLogin" and add_data.get("MFAUsed") == "No":
+    login_failed = (data.get("responseElements") or {}).get("ConsoleLogin") == "Failure"
+    if event_name == "ConsoleLogin" and user_identity.get("type") == "Root":
+        # Tai khoan root khong nen dung hang ngay (CIS AWS 1.7): moi lan dang nhap (ke ca that bai) deu la su co.
+        record_incident("ROOT_ACCOUNT_LOGIN", "CRITICAL",
+                        {"user": "root", "ip": ip, "mfa_used": add_data.get("MFAUsed"),
+                         "outcome": "Failure" if login_failed else "Success"}, raw_message)
+    elif event_name == "ConsoleLogin" and login_failed:
+        # CloudTrail ghi MFAUsed="No" cho MOI lan dang nhap that bai: neu khong tach rieng thi doan sai mat khau
+        # bi bao nham la "dang nhap khong MFA". Lan sai le te la binh thuong; nhieu lan tu 1 IP la do mat khau.
+        _track_console_brute_force(who, ip, raw_message)
+    elif event_name == "ConsoleLogin" and add_data.get("MFAUsed") == "No":
         record_incident("CONSOLE_LOGIN_NO_MFA", "HIGH", {"user": who, "ip": ip}, raw_message)
     elif event_name in ("DeactivateMFADevice", "DeleteVirtualMFADevice"):
         record_incident("MFA_TAMPERING", "CRITICAL", {"action": event_name, "user": who, "ip": ip}, raw_message)
     elif event_name in ("StopLogging", "DeleteTrail"):
         record_incident("CLOUDTRAIL_TAMPERING", "CRITICAL", {"action": event_name, "user": who, "ip": ip}, raw_message)
+    elif event_name in KMS_TAMPER_EVENTS:
+        params = data.get("requestParameters") or {}
+        record_incident("KMS_KEY_TAMPERING", "CRITICAL",
+                        {"action": event_name, "user": who, "ip": ip, "key_id": params.get("keyId")}, raw_message)
     elif event_name in IAM_PRIVILEGE_EVENTS:
         evaluate_iam_privilege_event(data, event_name, user_identity, ip, raw_message)
 
 
+def _track_console_brute_force(who, ip, raw_message: str) -> None:
+    """Chi canh bao, khong khoa: muc tieu la AWS Console, khoa IP o web app cua ta khong ngan duoc gi."""
+    if not table:
+        return
+    try:
+        count = count_in_window(f"STATE#CONSOLE_LOGIN_FAILED#{str(ip)[:64]}", CONSOLE_FAIL_WINDOW_S)
+    except Exception as exc:
+        print(f"[ERROR] Console state tracking failed: {type(exc).__name__}")
+        return
+    if count == CONSOLE_FAIL_THRESHOLD:
+        record_incident("CONSOLE_BRUTE_FORCE", "HIGH", {
+            "user": who, "ip": ip, "attempt_count": count, "window_seconds": CONSOLE_FAIL_WINDOW_S,
+        }, raw_message)
+
+
 def evaluate_iam_privilege_event(data: dict, event_name: str, user_identity: dict, ip: str, raw_message: str) -> None:
-    """3 luat CloudTrail IAM: CreateAccessKey, AttachUserPolicy, PutUserPolicy."""
+    """Luat leo thang dac quyen IAM (xem IAM_PRIVILEGE_EVENTS). Lan thu bi tu choi cung duoc ghi nhan."""
     params = data.get("requestParameters") or {}  # CloudTrail dat null khi khong co tham so
     actor = user_identity.get("userName") or user_identity.get("arn") or user_identity.get("type")
     details = {
@@ -386,19 +579,19 @@ def evaluate_iam_privilege_event(data: dict, event_name: str, user_identity: dic
         "target_user": params.get("userName"),
         "ip": ip,
     }
+    for field, param in (("target_role", "roleName"), ("target_group", "groupName"),
+                         ("policy_arn", "policyArn"), ("policy_name", "policyName")):
+        if param in params:
+            details[field] = params[param]
     if data.get("errorCode"):
         details["error_code"] = data.get("errorCode")  # van ghi nhan ca lan thu bi tu choi
+    # CloudFormation (vd `cdk deploy`) cung tao/sua role: van bao, nhung danh dau de SOC phan biet nhanh.
+    # Khong bo qua, vi CloudFormation chinh la mot duong leo thang quyen quen thuoc.
+    if user_identity.get("invokedBy"):
+        details["via_service"] = user_identity.get("invokedBy")
 
-    if event_name == "CreateAccessKey":
-        record_incident("IAM_ACCESS_KEY_CREATED", "HIGH", details, raw_message)
-    elif event_name == "AttachUserPolicy":
-        policy_arn = params.get("policyArn")
-        details["policy_arn"] = policy_arn
-        severity = "CRITICAL" if policy_arn == ADMIN_POLICY_ARN else "HIGH"
-        record_incident("IAM_POLICY_ATTACHED", severity, details, raw_message)
-    elif event_name == "PutUserPolicy":
-        details["policy_name"] = params.get("policyName")
-        record_incident("IAM_INLINE_POLICY_PUT", "HIGH", details, raw_message)
+    severity = "CRITICAL" if params.get("policyArn") == ADMIN_POLICY_ARN else "HIGH"
+    record_incident(IAM_PRIVILEGE_EVENTS[event_name], severity, details, raw_message)
 
 
 # ================================================================== handler

@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LogSentinel — SOC Console</title>
+  <link rel="stylesheet" href="/static/console.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span>LogSentinel <small>SOC Console</small></div>
+    <div id="userbox" hidden>
+      <span id="username"></span>
+      <span id="role-badge" class="role"></span>
+      <button id="account-toggle" class="ghost" type="button">Tài khoản</button>
+      <button id="logout" class="ghost" type="button">Đăng xuất</button>
+    </div>
+  </header>
+
+  <!-- ===================== Chưa đăng nhập ===================== -->
+  <main id="login-view" class="card narrow" hidden>
+    <div class="tabs" id="auth-tabs" hidden>
+      <button type="button" class="tab" data-tab="login">Đăng nhập</button>
+      <button type="button" class="tab" data-tab="register">Đăng ký</button>
+    </div>
+
+    <section id="panel-login">
+      <h1>Đăng nhập</h1>
+      <p class="muted" id="login-hint">Dùng tài khoản quản trị và mã 6 số trong ứng dụng Authenticator.</p>
+      <form id="login-form" autocomplete="off">
+        <label>Tài khoản <input name="username" id="login-user" required maxlength="254"></label>
+        <label>Mật khẩu <input name="password" type="password" required maxlength="128"></label>
+        <label id="otp-field">Mã OTP <input name="otp" id="login-otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"></label>
+        <button type="submit">Đăng nhập</button>
+        <button type="button" id="forgot-link" class="link" hidden>Quên mật khẩu?</button>
+        <p id="login-error" class="error" role="alert"></p>
+      </form>
+    </section>
+
+    <section id="panel-forgot" hidden>
+      <h1>Quên mật khẩu</h1>
+      <p class="muted">Nhập email đã đăng ký, chúng tôi sẽ gửi mã 6 số để bạn đặt mật khẩu mới.</p>
+      <form id="forgot-form" autocomplete="off">
+        <label>Email <input name="email" id="forgot-email" type="email" required maxlength="254"></label>
+        <button type="submit">Gửi mã</button>
+        <button type="button" class="ghost back-to-login">Quay lại</button>
+        <p id="forgot-error" class="error" role="alert"></p>
+      </form>
+    </section>
+
+    <section id="panel-reset" hidden>
+      <h1>Đặt mật khẩu mới</h1>
+      <p class="muted" id="reset-info"></p>
+      <form id="reset-form" autocomplete="off">
+        <label>Mã xác nhận <input name="code" id="reset-code" inputmode="numeric" maxlength="10" required></label>
+        <label>Mật khẩu mới <input name="password" id="rst-pass" type="password" required maxlength="128" autocomplete="new-password"></label>
+        <div class="meter" id="rst-meter" data-level="-1" aria-live="polite">
+          <div class="bar"><span></span></div>
+          <span class="level" id="rst-level">Chưa nhập mật khẩu</span>
+        </div>
+        <p class="muted" id="rst-warning"></p>
+        <ul class="tips" id="rst-tips"></ul>
+        <label>Nhập lại mật khẩu <input name="password2" id="rst-pass2" type="password" required maxlength="128" autocomplete="new-password"></label>
+        <button type="submit" id="rst-submit" disabled>Đặt lại mật khẩu</button>
+        <button type="button" class="ghost back-to-login">Hủy</button>
+        <p id="reset-error" class="error" role="alert"></p>
+      </form>
+    </section>
+
+    <section id="panel-mfa" hidden>
+      <h1>Xác thực 2 lớp</h1>
+      <p class="muted">Nhập mã 6 số hiện trong ứng dụng Authenticator.</p>
+      <form id="mfa-form" autocomplete="off">
+        <label>Mã OTP <input name="code" id="mfa-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required></label>
+        <button type="submit">Xác nhận</button>
+        <p id="mfa-error" class="error" role="alert"></p>
+      </form>
+    </section>
+
+    <section id="panel-register" hidden>
+      <h1>Đăng ký tài khoản</h1>
+      <p class="muted">Sau khi xác nhận email, quản trị viên cần duyệt thì bạn mới xem được dữ liệu.</p>
+      <form id="register-form" autocomplete="off">
+        <label>Email <input name="email" id="reg-email" type="email" required maxlength="254"></label>
+        <label>Mật khẩu <input name="password" id="reg-pass" type="password" required maxlength="128" autocomplete="new-password"></label>
+        <div class="meter" id="reg-meter" data-level="-1" aria-live="polite">
+          <div class="bar"><span></span></div>
+          <span class="level" id="reg-level">Chưa nhập mật khẩu</span>
+        </div>
+        <p class="muted" id="reg-warning"></p>
+        <ul class="tips" id="reg-tips"></ul>
+        <label>Nhập lại mật khẩu <input name="password2" id="reg-pass2" type="password" required maxlength="128" autocomplete="new-password"></label>
+        <button type="submit" id="reg-submit" disabled>Đăng ký</button>
+        <p id="register-error" class="error" role="alert"></p>
+      </form>
+    </section>
+
+    <section id="panel-confirm" hidden>
+      <h1>Xác nhận email</h1>
+      <p class="muted">Chúng tôi đã gửi mã 6 số tới <b id="confirm-email"></b>. Nhập mã để kích hoạt tài khoản.</p>
+      <form id="confirm-form" autocomplete="off">
+        <label>Mã xác nhận <input name="code" id="confirm-code" inputmode="numeric" maxlength="10" required></label>
+        <button type="submit">Xác nhận</button>
+        <button type="button" id="resend" class="ghost">Gửi lại mã</button>
+        <p id="confirm-error" class="error" role="alert"></p>
+        <p id="confirm-ok" class="ok" role="status"></p>
+      </form>
+    </section>
+  </main>
+
+  <!-- ===================== Đã đăng nhập ===================== -->
+  <main id="app-view" hidden>
+    <section id="pending-notice" class="card notice" hidden>
+      <h2>Tài khoản đang chờ duyệt</h2>
+      <p class="muted">Email của bạn đã được xác nhận. Quản trị viên cần duyệt thì bạn mới xem được sự cố và IP bị khóa.
+        Trong lúc chờ, bạn có thể bật xác thực 2 lớp ở mục <b>Tài khoản</b>.</p>
+    </section>
+
+    <section id="account-card" class="card" hidden>
+      <div class="card-head"><h2>Tài khoản &amp; bảo mật</h2></div>
+      <p>Email: <b id="acc-email"></b> · Vai trò: <b id="acc-role"></b></p>
+      <div class="mfa-row">
+        <div>
+          <b>Xác thực 2 lớp (2FA)</b> — <span id="mfa-state" class="muted">đang kiểm tra…</span>
+          <p class="muted" id="mfa-note"></p>
+        </div>
+        <button type="button" id="mfa-toggle" class="small" hidden></button>
+      </div>
+      <div id="mfa-disable" hidden>
+        <p>Để tắt 2FA, hãy xác nhận lại bằng <b>mật khẩu</b> và <b>mã OTP hiện tại</b> trong ứng dụng Authenticator.</p>
+        <form id="mfa-disable-form" autocomplete="off">
+          <label>Mật khẩu <input name="password" type="password" required maxlength="128" autocomplete="current-password"></label>
+          <label>Mã OTP <input name="code" id="mfa-disable-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required></label>
+          <button type="submit">Xác nhận tắt 2FA</button>
+          <button type="button" id="mfa-disable-cancel" class="ghost">Hủy</button>
+        </form>
+      </div>
+      <div id="mfa-setup" hidden>
+        <p>1. Mở Google Authenticator / Microsoft Authenticator và quét mã QR (hoặc chọn <i>Nhập khóa thiết lập</i>).</p>
+        <div id="mfa-qr" class="qr"></div>
+        <p class="muted">Khóa thủ công: <code id="mfa-secret"></code></p>
+        <p>2. Nhập mã 6 số đang hiện trong ứng dụng để bật 2FA.</p>
+        <form id="mfa-enable-form" autocomplete="off">
+          <label>Mã OTP <input name="code" id="mfa-enable-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required></label>
+          <button type="submit">Bật 2FA</button>
+          <button type="button" id="mfa-cancel" class="ghost">Hủy</button>
+        </form>
+      </div>
+      <p id="account-error" class="error" role="alert"></p>
+    </section>
+
+    <div id="data-view">
+      <section class="tiles">
+        <div class="tile"><span class="num" id="t-total">–</span><span class="lbl">Sự cố (50 gần nhất)</span></div>
+        <div class="tile crit"><span class="num" id="t-critical">–</span><span class="lbl">Mức CRITICAL</span></div>
+        <div class="tile high"><span class="num" id="t-high">–</span><span class="lbl">Mức HIGH</span></div>
+        <div class="tile"><span class="num" id="t-blocked">–</span><span class="lbl">IP đang bị khóa</span></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>IP đang bị khóa</h2>
+          <span class="muted" id="refreshed"></span>
+        </div>
+        <table>
+          <thead><tr><th>IP</th><th>Lý do</th><th>Khóa lúc</th><th>Còn lại</th><th></th></tr></thead>
+          <tbody id="blocks"></tbody>
+        </table>
+        <p class="empty" id="blocks-empty" hidden>Không có IP nào đang bị khóa.</p>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Sự cố gần đây</h2>
+          <select id="filter" aria-label="Lọc theo mức độ">
+            <option value="">Tất cả mức độ</option>
+            <option value="CRITICAL">CRITICAL</option>
+            <option value="HIGH">HIGH</option>
+          </select>
+        </div>
+        <table>
+          <thead><tr><th>Thời gian</th><th>Mức độ</th><th>Luật</th><th>IP</th><th>Đối tượng</th><th>Chi tiết</th></tr></thead>
+          <tbody id="incidents"></tbody>
+        </table>
+        <p class="empty" id="incidents-empty" hidden>Chưa có sự cố nào.</p>
+      </section>
+    </div>
+
+    <section id="users-card" class="card" hidden>
+      <div class="card-head"><h2>Người dùng</h2><span class="muted">Chỉ quản trị viên thấy mục này</span></div>
+      <h3>Chờ duyệt</h3>
+      <table><tbody id="users-pending"></tbody></table>
+      <p class="empty" id="users-pending-empty" hidden>Không có ai đang chờ duyệt.</p>
+      <h3>Được xem dữ liệu</h3>
+      <table><tbody id="users-viewers"></tbody></table>
+      <p class="empty" id="users-viewers-empty" hidden>Chưa có người dùng nào được duyệt.</p>
+      <p class="muted" id="users-admins"></p>
+    </section>
+    <p id="app-error" class="error" role="alert"></p>
+  </main>
+
+  <script src="/static/password-strength.js"></script>
+  <script src="/static/console.js"></script>
+</body>
+</html>

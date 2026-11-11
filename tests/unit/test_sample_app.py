@@ -42,6 +42,7 @@ def env(tmp_path):
         "APP_ADMIN_PASSWORD": "S3cure-Pass",
         "APP_TOTP_SECRET": TOTP_SECRET,
         "APP_SETUP_TOKEN": SETUP_TOKEN,
+        "APP_SESSION_SECRET": "s" * 48,
         "INCIDENT_TABLE": "tbl",
         "TRUST_PROXY": "true",
         "APP_LOG_PATH": str(tmp_path / "access.log"),
@@ -64,24 +65,42 @@ def harness(mod, env):
         calls.append(ip)
         return blocked.get(ip)
 
+    class FakeStore:
+        def __init__(self):
+            self.incidents, self.blocks, self.unblocked = [], [], []
+
+        def recent_incidents(self, limit=50):
+            return self.incidents[:limit]
+
+        def active_blocks(self, now):
+            return [b for b in self.blocks if b["ttl"] > now]
+
+        def unblock(self, ip):
+            self.unblocked.append(ip)
+            blocked.pop(ip, None)
+
+    store = FakeStore()
     bl = mod.BlockList(lookup, clock=clock, negative_ttl=5)
-    app = mod.create_app(mod.load_config_from_env(env), bl)
+    app = mod.create_app(mod.load_config_from_env(env), bl, store)
     client = app.test_client()
     log_path = Path(env["APP_LOG_PATH"])
 
     def logs():
         return [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
 
-    return types.SimpleNamespace(client=client, blocked=blocked, calls=calls, clock=clock, logs=logs, bl=bl)
+    return types.SimpleNamespace(client=client, blocked=blocked, calls=calls, clock=clock, logs=logs, bl=bl,
+                                 store=store)
 
 
 def via_nginx(ip):
-    """Mo phong request da di qua Nginx: ket noi vat ly tu 127.0.0.1, header do Nginx ghi de."""
-    return {"environ_base": {"REMOTE_ADDR": "127.0.0.1"}, "headers": {"X-Real-IP": ip, "X-Forwarded-For": ip}}
+    """Mo phong request da di qua Nginx: ket noi vat ly tu 127.0.0.1, header do Nginx ghi de, HTTPS."""
+    return {"environ_base": {"REMOTE_ADDR": "127.0.0.1"}, "headers": {"X-Real-IP": ip, "X-Forwarded-For": ip},
+            "base_url": "https://localhost"}
 
 
 # ------------------------------------------------------------- config
-@pytest.mark.parametrize("missing", ["APP_ADMIN_PASSWORD", "APP_TOTP_SECRET", "APP_SETUP_TOKEN", "INCIDENT_TABLE"])
+@pytest.mark.parametrize("missing", ["APP_ADMIN_PASSWORD", "APP_TOTP_SECRET", "APP_SETUP_TOKEN",
+                                     "APP_SESSION_SECRET", "INCIDENT_TABLE"])
 def test_missing_secret_fails_fast(mod, env, missing):
     env.pop(missing)
     with pytest.raises(RuntimeError, match=missing):
@@ -229,3 +248,118 @@ def test_full_login_success(harness):
 def test_oversized_body_rejected(harness):
     r = harness.client.post("/login", data={"username": "a" * 50_000}, **via_nginx("198.51.100.11"))
     assert r.status_code == 413
+
+
+# ---------------------------------------------------------- SOC Console
+from decimal import Decimal  # noqa: E402
+
+ADMIN_IP = "198.51.100.50"
+
+
+def _sign_in(h):
+    assert _login(h, ADMIN_IP, username="admin", password="S3cure-Pass", otp=GOOD_OTP).status_code == 200
+    return h.client.get("/api/session", **via_nginx(ADMIN_IP)).get_json()["csrf"]
+
+
+def _post(h, path, csrf=None, json_body=None):
+    kw = via_nginx(ADMIN_IP)
+    if csrf:
+        kw["headers"]["X-CSRF-Token"] = csrf
+    return h.client.post(path, json=json_body, **kw)
+
+
+def test_console_page_served_with_csp(harness):
+    r = harness.client.get("/console", **via_nginx(ADMIN_IP))
+    assert r.status_code == 200 and "SOC Console" in r.get_data(as_text=True)
+    assert "default-src 'self'" in r.headers["Content-Security-Policy"]
+
+
+@pytest.mark.parametrize("path", ["/api/session", "/api/overview"])
+def test_console_api_requires_login(harness, path):
+    assert harness.client.get(path, **via_nginx(ADMIN_IP)).status_code == 401
+
+
+def test_session_cookie_is_hardened(harness):
+    r = _login(harness, ADMIN_IP, username="admin", password="S3cure-Pass", otp=GOOD_OTP)
+    cookie = r.headers["Set-Cookie"]
+    assert "Secure" in cookie and "HttpOnly" in cookie and "SameSite=Strict" in cookie
+
+
+def test_overview_returns_incidents_and_only_active_blocks(harness):
+    harness.store.incidents = [{
+        "incident_id": "abc", "timestamp": "2026-11-11T08:00:00+00:00", "rule": "SQL_INJECTION",
+        "severity": "CRITICAL", "raw_payload": "SECRET-RAW",
+        "details": {"client_ip": "203.0.113.5", "payload": "<script>alert(1)</script>", "latency": Decimal("0.25")},
+    }]
+    now = int(__import__("time").time())
+    harness.store.blocks = [
+        {"blocked_ip": "203.0.113.5", "reason": "sqli", "blocked_at": "x", "ttl": Decimal(now + 3600)},
+        {"blocked_ip": "203.0.113.6", "reason": "old", "blocked_at": "x", "ttl": Decimal(now - 10)},
+    ]
+    _sign_in(harness)
+    r = harness.client.get("/api/overview", **via_nginx(ADMIN_IP))
+    body = r.get_json()
+    assert r.status_code == 200 and r.mimetype == "application/json"
+    assert body["incidents"][0]["ip"] == "203.0.113.5" and body["incidents"][0]["details"]["latency"] == 0.25
+    assert [b["ip"] for b in body["blocks"]] == ["203.0.113.5"]
+    assert "SECRET-RAW" not in r.get_data(as_text=True)  # raw_payload khong lo ra giao dien
+
+
+def test_unblock_requires_csrf_token(harness):
+    _sign_in(harness)
+    assert _post(harness, "/api/unblock", json_body={"ip": "203.0.113.5"}).status_code == 403
+    assert _post(harness, "/api/unblock", csrf="wrong", json_body={"ip": "203.0.113.5"}).status_code == 403
+    assert harness.store.unblocked == []
+
+
+def test_unblock_removes_block_immediately_and_is_audited(harness):
+    harness.blocked["203.0.113.5"] = harness.clock.t + 3600
+    assert harness.client.get("/health", **via_nginx("203.0.113.5")).status_code == 403
+    csrf = _sign_in(harness)
+    assert _post(harness, "/api/unblock", csrf=csrf, json_body={"ip": "203.0.113.5"}).status_code == 200
+    assert harness.store.unblocked == ["203.0.113.5"]
+    assert harness.client.get("/health", **via_nginx("203.0.113.5")).status_code == 200
+    audit = [e for e in harness.logs() if e["event_type"] == "ADMIN_UNBLOCK"][-1]
+    assert audit["unblocked_ip"] == "203.0.113.5" and audit["username"] == "admin"
+
+
+@pytest.mark.parametrize("bad", ["", "not-an-ip", "1.2.3.4; rm -rf", None])
+def test_unblock_rejects_invalid_ip(harness, bad):
+    csrf = _sign_in(harness)
+    assert _post(harness, "/api/unblock", csrf=csrf, json_body={"ip": bad}).status_code == 400
+
+
+def test_logout_ends_session(harness):
+    csrf = _sign_in(harness)
+    assert _post(harness, "/api/logout", csrf=csrf).status_code == 200
+    assert harness.client.get("/api/overview", **via_nginx(ADMIN_IP)).status_code == 401
+
+
+def test_store_failure_returns_502_not_stacktrace(harness):
+    _sign_in(harness)
+    harness.store.recent_incidents = lambda limit=50: (_ for _ in ()).throw(RuntimeError("AccessDenied arn:aws:..."))
+    r = harness.client.get("/api/overview", **via_nginx(ADMIN_IP))
+    assert r.status_code == 502 and "arn:aws" not in r.get_data(as_text=True)
+
+
+def test_console_script_never_uses_innerhtml():
+    js = (Path(APP_SRC) / "static" / "console.js").read_text(encoding="utf-8")
+    code = "\n".join(l for l in js.splitlines() if not l.strip().startswith("//"))
+    assert "innerHTML" not in code and "document.write" not in code and "eval(" not in code
+
+
+# ------------------------------------------------------- do quet (404)
+def test_missing_path_is_logged_so_the_detector_can_spot_scanners(harness):
+    r = harness.client.get("/wp-login.php", **via_nginx("198.51.100.30"))
+    entry = harness.logs()[-1]
+    assert r.status_code == 404
+    assert entry["event_type"] == "NOT_FOUND" and entry["path"] == "/wp-login.php"
+    assert entry["client_ip"] == "198.51.100.30" and entry["status_code"] == 404
+
+
+def test_scanner_is_cut_off_locally_at_the_thirtieth_missing_path(harness):
+    """Khong chan tai cho thi scanner ghi hang nghin dong log trong luc cho Detector (ton tien log + Lambda)."""
+    codes = [harness.client.get(f"/probe-{i}.php", **via_nginx("198.51.100.31")).status_code for i in range(40)]
+    assert codes == [404] * 30 + [403] * 10
+    assert sum(e["event_type"] == "NOT_FOUND" for e in harness.logs()) == 30
+    assert harness.client.get("/health", **via_nginx("198.51.100.32")).status_code == 200   # IP khac khong bi anh huong
