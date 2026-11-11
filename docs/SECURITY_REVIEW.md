@@ -198,3 +198,39 @@ Ba mục đầu có test `xfail(strict)` ở nhóm G của bộ red-team: khi ai
 - SOC Console chạy chung máy với ứng dụng mục tiêu và chỉ có một tài khoản quản trị.
 - SNS topic chưa mã hóa KMS.
 - `cdk.context.json` chứa VPC ID và Account ID thật. Che đi trước khi để repo public.
+
+## 8. Hướng mở rộng trong tương lai
+
+### 8.1 Kiến trúc 2 AZ (đã thiết kế, chưa triển khai)
+
+```
+Người dùng → CloudFront + WAF → ALB (2 AZ) → 2 máy EC2 (mỗi AZ một máy, Auto Scaling Group)
+Dùng chung: DynamoDB, Cognito, Secrets Manager, S3, Lambda (các dịch vụ này đã chạy nhiều AZ sẵn)
+```
+
+Các quyết định đã chốt với chủ dự án (11/2026):
+
+| Quyết định | Lựa chọn | Lý do |
+|---|---|---|
+| Phạm vi | Chỉ trong chế độ edge; chế độ trực tiếp vẫn 1 máy | Chế độ trực tiếp là lab, không có ALB để chia tải |
+| Vị trí máy | Subnet public, security group chỉ nhận từ ALB | Subnet private cần NAT Gateway, khoảng 40 USD/tháng mỗi cái |
+| Bí mật | Mật khẩu admin, khóa 2FA, khóa ký cookie chuyển sang Secrets Manager | Hiện sinh riêng từng máy nên 2 máy không dùng chung cookie được |
+| Bộ đếm đăng nhập sai | Chuyển sang DynamoDB, mọi máy đếm chung; ngưỡng thành tham số deploy | Bộ đếm trong RAM bị nhân theo số máy |
+| Số máy | Chưa chốt: 2 máy cố định, hoặc 1 máy tự phục hồi trên 2 AZ | Console chỉ là dashboard; máy chết thì Detector và cảnh báo vẫn chạy |
+
+Việc phải làm khi triển khai: miễn kiểm header `X-Origin-Verify` cho `/health` (ALB health check không mang header
+này); đổi cách lấy IP thật sang header `CloudFront-Viewer-Address` vì có thêm ALB ở giữa, rồi chạy lại test
+B1 và F9 của bộ red-team; thay `user_data_causes_replacement` bằng rolling update. Chi phí: xem `COST.md` mục 3.
+
+Lý do hoãn: chi phí khoảng 70 USD/tháng, gấp 4 lần chế độ mặc định, trong khi mục tiêu hiện tại là đồ án.
+
+### 8.2 Tên miền riêng và HTTPS đầu-cuối
+
+`logsentinel.com` đã có chủ. Phương án: `logsentinel.net`, DNS trên Route 53, chứng chỉ ACM. Tài khoản AWS gói
+Free Tier không đăng ký được tên miền qua Route 53; phải nâng gói hoặc mua ở nhà đăng ký khác rồi trỏ về.
+Khi có tên miền và ALB, chặng CloudFront → máy chuyển từ HTTP sang HTTPS.
+
+### 8.3 Tích hợp ứng dụng của khách hàng
+
+Hệ thống hiện chỉ giám sát ứng dụng mẫu của chính nó. Hướng đề xuất: agent đọc access log Nginx/Apache kèm chế độ
+"chỉ cảnh báo", dùng WAF sẵn có để chặn; sau đó mới tới thư viện cho từng framework.

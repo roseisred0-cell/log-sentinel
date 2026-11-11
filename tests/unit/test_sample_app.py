@@ -346,3 +346,20 @@ def test_console_script_never_uses_innerhtml():
     js = (Path(APP_SRC) / "static" / "console.js").read_text(encoding="utf-8")
     code = "\n".join(l for l in js.splitlines() if not l.strip().startswith("//"))
     assert "innerHTML" not in code and "document.write" not in code and "eval(" not in code
+
+
+# ------------------------------------------------------- do quet (404)
+def test_missing_path_is_logged_so_the_detector_can_spot_scanners(harness):
+    r = harness.client.get("/wp-login.php", **via_nginx("198.51.100.30"))
+    entry = harness.logs()[-1]
+    assert r.status_code == 404
+    assert entry["event_type"] == "NOT_FOUND" and entry["path"] == "/wp-login.php"
+    assert entry["client_ip"] == "198.51.100.30" and entry["status_code"] == 404
+
+
+def test_scanner_is_cut_off_locally_at_the_thirtieth_missing_path(harness):
+    """Khong chan tai cho thi scanner ghi hang nghin dong log trong luc cho Detector (ton tien log + Lambda)."""
+    codes = [harness.client.get(f"/probe-{i}.php", **via_nginx("198.51.100.31")).status_code for i in range(40)]
+    assert codes == [404] * 30 + [403] * 10
+    assert sum(e["event_type"] == "NOT_FOUND" for e in harness.logs()) == 30
+    assert harness.client.get("/health", **via_nginx("198.51.100.32")).status_code == 200   # IP khac khong bi anh huong

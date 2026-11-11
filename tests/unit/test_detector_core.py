@@ -219,3 +219,11 @@ def test_iam_user_login_with_mfa_is_not_an_incident(det):
         "eventName": "ConsoleLogin", "userIdentity": {"type": "IAMUser", "userName": "dev"},
         "additionalEventData": {"MFAUsed": "Yes"}}))
     det.table.put_item.assert_not_called()
+
+
+def test_incident_records_are_kept_30_days_on_the_console(det, monkeypatch):
+    monkeypatch.setattr(det, "_now", lambda: 1_000_000)
+    det.evaluate_webapp_log(json.dumps({"event_type": "SQL_INJECTION", "client_ip": "198.51.100.7"}))
+    incident = next(c.kwargs["Item"] for c in det.table.put_item.call_args_list
+                    if c.kwargs["Item"].get("record_type") == "INCIDENT")
+    assert incident["ttl"] == 1_000_000 + 30 * 24 * 3600

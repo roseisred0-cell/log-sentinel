@@ -20,6 +20,7 @@ CloudTrail (multi-region, KMS) ─> S3 + /logsentinel/cloudtrail ─────
 | `docs/SECURITY_REVIEW.md` | Lỗ hổng đã vá, đối chiếu kế hoạch, runbook GameDay, ghi chú FinOps |
 | `docs/USER_GUIDE.md` | Hướng dẫn cho khách hàng: SOC Console (`/console`), ý nghĩa từng luật |
 | `docs/LOG_CONVENTION.md` | Hợp đồng log giữa web app và Detector |
+| `docs/COST.md` | Chi phí ước tính theo tháng cho từng chế độ, và chi phí khi bị tấn công |
 | `HANDOVER_NGUOI_B.md` | Bàn giao A → B |
 
 ## Chạy nhanh

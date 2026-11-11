@@ -37,6 +37,24 @@
 aws cognito-idp admin-add-user-to-group --user-pool-id <UserPoolId> --username <email> --group-name soc-admins
 ```
 
+## Truy vấn log bằng Athena (cho người làm báo cáo và điều tra)
+
+Log CloudTrail lưu trên S3 truy vấn được bằng SQL, không cần máy chủ.
+
+1. Người triển khai gắn quyền chỉ đọc cho IAM user của bạn (ARN lấy ở output `AthenaAnalystPolicyArn`):
+   `aws iam attach-user-policy --user-name <user> --policy-arn <AthenaAnalystPolicyArn>`
+2. Mở AWS Console → **Athena** (region Singapore) → chọn workgroup **`logsentinel`**, database **`logsentinel`**.
+3. Tab **Saved queries** có sẵn 5 truy vấn: sự kiện theo ngày (vẽ biểu đồ xu hướng), top hành động, đăng nhập Console thất bại theo IP, thay đổi IAM, lời gọi API bị từ chối.
+4. Khi tự viết truy vấn, luôn lọc theo cột `day` (dạng `2026/11/11`) để Athena chỉ đọc những ngày cần thiết:
+
+```sql
+SELECT eventtime, eventname, sourceipaddress
+FROM cloudtrail_logs
+WHERE day >= '2026/11/01' AND region = 'us-east-1' AND eventname = 'ConsoleLogin'
+```
+
+Lưu ý: mỗi truy vấn bị giới hạn 1 GB dữ liệu quét (khoảng 0,005 USD) để một câu SQL viết sai không gây tốn kém. Log chỉ được giữ 30 ngày. CloudTrail ghi file lên S3 chậm khoảng 5–15 phút so với thực tế. Sự kiện IAM và đăng nhập Console nằm ở `region = 'us-east-1'`.
+
 ## Dùng hằng ngày
 
 - **4 ô số trên cùng:** tổng sự cố gần đây, số mức CRITICAL, số mức HIGH, số IP đang bị khóa.
@@ -50,6 +68,8 @@ aws cognito-idp admin-add-user-to-group --user-pool-id <UserPoolId> --username <
 |---|---|---|
 | `BRUTE_FORCE_DETECTED` | Một IP sai mật khẩu 5 lần trong 60 giây | IP đã tự khóa. Nếu là người nhà thì gỡ khóa |
 | `SLOW_BRUTE_FORCE` | Một IP sai mật khẩu 20 lần trong 1 giờ, rải đều để né luật trên | IP đã tự khóa. Kiểm tra các tài khoản bị nhắm tới |
+| `LOGIN_FAILURE_SPIKE` | Toàn hệ thống có hơn 50 lần đăng nhập sai trong 5 phút, từ nhiều IP vào nhiều tài khoản | Dấu hiệu dùng danh sách mật khẩu bị lộ để thử hàng loạt. Yêu cầu người dùng đổi mật khẩu và bật 2FA |
+| `SCAN_DETECTED` | Một IP gọi 30 đường dẫn không tồn tại trong 60 giây (đang dò tìm lỗ hổng) | IP đã tự khóa. Không cần làm gì thêm |
 | `ACCOUNT_UNDER_ATTACK` | Một tài khoản bị đoán sai 10 lần trong 5 phút từ **nhiều IP khác nhau** (tấn công phân tán) | Không IP nào bị khóa tự động. Đổi mật khẩu tài khoản đó, bật 2FA, cân nhắc thu hẹp `ingress_cidr` |
 | `SQL_INJECTION` | Có người thử chèn mã độc vào ô tìm kiếm | IP đã tự khóa. Không cần làm gì thêm |
 | `MFA_BYPASS_ATTEMPT` | Mật khẩu **đúng** nhưng mã OTP sai | **Đổi mật khẩu ngay**: mật khẩu có thể đã lộ |

@@ -24,6 +24,8 @@
   2. Cập nhật giá trị thật vào AWS Secrets Manager (`logsentinel/telegram_credentials`).
   3. Bổ sung hàm gửi request HTTP tới `https://api.telegram.org/bot<TOKEN>/sendMessage` trong `lambda_src/detector.py`.
 
+> **Cập nhật 11/2026:** Hạng mục 1 (Telegram) và 2 (Athena) đã có trong code. Telegram chỉ còn thiếu việc điền `BOT_TOKEN` / `CHAT_ID` thật vào Secrets Manager. Athena: xem `docs/USER_GUIDE.md` mục "Truy vấn log bằng Athena". Script tấn công tên đúng là `attack_sim.py` (không phải `attack_suite.py`). Bảng chi phí: `docs/COST.md`.
+
 ### Hạng mục 2: Truy vấn Log quy mô lớn với Amazon Athena (Tuỳ chọn nâng cao)
 - **Hiện trạng:** Toàn bộ log CloudTrail đã được nén và lưu tự động vào S3 `LogArchiveBucket`.
 - **Việc cần làm:** Mở Amazon Athena console, tạo bảng trỏ vào S3 `LogArchiveBucket` để chạy các câu lệnh SQL thống kê sự cố phục vụ chụp ảnh báo cáo.

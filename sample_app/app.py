@@ -382,6 +382,7 @@ SESSION_MINUTES = 30
 SESSION_ABSOLUTE_SECONDS = {"cognito": SESSION_MINUTES * 60, "local": 8 * 3600}
 MFA_CHALLENGE_SECONDS = 170  # Cognito giu phien thu thach MFA 3 phut
 LOCAL_BRUTE_FORCE_THRESHOLD = 5  # phai bang BRUTE_FORCE_THRESHOLD trong lambda_src/detector.py
+LOCAL_SCAN_THRESHOLD = 30        # phai bang SCAN_THRESHOLD trong lambda_src/detector.py
 _EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,250}\.[^@\s.]{2,}$")
 _ADMIN_ROLES = ("admin",)
 _DATA_ROLES = ("viewer", "admin")  # "pending" (moi dang ky, chua duoc duyet) khong xem duoc du lieu
@@ -488,6 +489,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
     reset_limiter = RateLimiter(limit=10, window=600, clock=clock)    # doan ma dat lai mat khau
     # Lan sai thu LOCAL_BRUTE_FORCE_THRESHOLD trong 60s -> chan tai cho (cung nguong voi Detector).
     fail_tracker = RateLimiter(limit=LOCAL_BRUTE_FORCE_THRESHOLD - 1, window=60, clock=clock)
+    scan_tracker = RateLimiter(limit=LOCAL_SCAN_THRESHOLD - 1, window=60, clock=clock)
 
     app = Flask(__name__)
     app.secret_key = config.session_secret
@@ -581,6 +583,15 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
                 "error": "Access Denied by SOAR Active Defense",
                 "message": f"Dia chi IP {g.client_ip} da bi LogSentinel tu dong khoa.",
             }), 403
+
+    @app.errorhandler(404)
+    def log_not_found(error):
+        """Duong dan khong ton tai: ghi lai de Detector nhan ra IP dang do quet. Tra ve trang 404 mac dinh."""
+        write_security_log("NOT_FOUND", 404)
+        # Lan 404 thu 30 trong 60s -> chan tai cho (cung nguong voi Detector), gioi han so dong log 1 scanner tao ra.
+        if not scan_tracker.allow(g.client_ip):
+            blocklist.block_locally(g.client_ip)
+        return error
 
     @app.after_request
     def harden_headers(resp):

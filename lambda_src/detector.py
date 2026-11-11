@@ -17,6 +17,7 @@ nen mot dich vu hong (Telegram, SNS) khong bao gio lam mat ban ghi su co.
 """
 import base64
 import gzip
+import html
 import ipaddress
 import json
 import os
@@ -39,7 +40,7 @@ table = dynamodb.Table(TABLE_NAME) if TABLE_NAME else None
 APP_LOG_GROUP = "/logsentinel/sample-app"
 TRAIL_LOG_GROUP = "/logsentinel/cloudtrail"
 
-INCIDENT_TTL_S = 7 * 86400
+INCIDENT_TTL_S = 30 * 86400  # bang thoi gian luu log (LOG_RETENTION_DAYS) de su co va log goc het han cung luc
 BLOCK_TTL_S = 86400
 BRUTE_FORCE_WINDOW_S = 60
 BRUTE_FORCE_THRESHOLD = 5
@@ -49,6 +50,12 @@ SLOW_BRUTE_FORCE_THRESHOLD = 20
 # Brute-force phan tan vao 1 tai khoan (nhieu IP, moi IP duoi nguong tren).
 ACCOUNT_ATTACK_WINDOW_S = 300
 ACCOUNT_ATTACK_THRESHOLD = 10
+# Spike: tong dang nhap sai cua TOAN he thong (nhieu IP x nhieu tai khoan, moi cap chi thu 1 lan).
+LOGIN_SPIKE_WINDOW_S = 300
+LOGIN_SPIKE_THRESHOLD = 50
+# Do quet duong dan: so lan 404 cua 1 IP. Phai bang LOCAL_SCAN_THRESHOLD trong sample_app/app.py.
+SCAN_WINDOW_S = 60
+SCAN_THRESHOLD = 30
 # Doan mat khau AWS Console tu 1 IP.
 CONSOLE_FAIL_WINDOW_S = 300
 CONSOLE_FAIL_THRESHOLD = 5
@@ -158,6 +165,53 @@ def _get_telegram_config():
     return _telegram_cache["cfg"]
 
 
+_SEVERITY_ICON = {"CRITICAL": chr(0x1F534), "HIGH": chr(0x1F7E0)}   # cham do / cham cam
+TELEGRAM_VALUE_CHARS = 300
+TELEGRAM_MAX_FIELDS = 8
+# Truong quen thuoc dua len dau voi nhan de doc; phan con lai liet ke theo ten truong.
+_TELEGRAM_LABELS = (("client_ip", "IP"), ("ip", "IP"), ("username", "Tai khoan"), ("user", "Tai khoan"),
+                    ("actor", "Nguoi thuc hien"), ("action", "Hanh dong"))
+_TELEGRAM_SKIP = {"timestamp", "source", "event_type", "severity"} | {k for k, _ in _TELEGRAM_LABELS}
+
+
+def _tg(value, limit: int = TELEGRAM_VALUE_CHARS) -> str:
+    """
+    Gia tri -> van ban an toan cho parse_mode HTML cua Telegram. Du lieu do ke tan cong nhap (payload, username)
+    khong the chen the HTML hay lam hong tin nhan. Cat TRUOC khi escape de khong cat ngang mot thuc the (&amp;).
+    """
+    raw = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    escaped = html.escape(raw[:limit], quote=False)
+    if len(escaped) > limit:   # toan ky tu phai escape: moi ky tu no ra toi da 5 lan
+        escaped = html.escape(raw[:limit // 5], quote=False)
+    return escaped
+
+
+def _telegram_time(now_iso: str) -> str:
+    try:
+        return datetime.fromisoformat(now_iso).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except (TypeError, ValueError):
+        return _tg(now_iso, 40)
+
+
+def _render_telegram(severity: str, rule: str, details: dict, inc_id: str, now_iso: str) -> str:
+    """Tin nhan cho man hinh dien thoai: moi dong mot y, gia tri ky thuat nam trong <code> de cham la sao chep."""
+    details = details if isinstance(details, dict) else {}
+    lines = [f"{_SEVERITY_ICON.get(severity, chr(0x26A0))} <b>{_tg(severity, 20)}</b> | <b>{_tg(rule, 60)}</b>",
+             f"Thoi gian: {_telegram_time(now_iso)}"]
+    seen = set()
+    for key, label in _TELEGRAM_LABELS:
+        if details.get(key) not in (None, "") and label not in seen:
+            seen.add(label)
+            lines.append(f"{label}: <code>{_tg(details[key])}</code>")
+    extra = [k for k in details if k not in _TELEGRAM_SKIP and details[k] not in (None, "")]
+    for key in extra[:TELEGRAM_MAX_FIELDS]:
+        lines.append(f"{_tg(str(key), 40)}: <code>{_tg(details[key])}</code>")
+    if len(extra) > TELEGRAM_MAX_FIELDS:
+        lines.append(f"(+{len(extra) - TELEGRAM_MAX_FIELDS} truong khac, xem SOC Console)")
+    lines.append(f"Ma su co: <code>{_tg(inc_id, 60)}</code>")
+    return "\n".join(lines)
+
+
 def send_telegram_alert(severity: str, rule: str, details: dict, inc_id: str, now_iso: str) -> None:
     """Gui canh bao Telegram. Ngat mach: loi 1 lan thi bo qua phan con lai cua batch."""
     global _telegram_failed_this_run
@@ -167,9 +221,14 @@ def send_telegram_alert(severity: str, rule: str, details: dict, inc_id: str, no
     if not cfg:
         return
     token, chat_id = cfg
-    text = _render_alert(severity, rule, details, inc_id, now_iso)[:TELEGRAM_MAX_CHARS]
+    message = {"chat_id": chat_id, "text": _render_telegram(severity, rule, details, inc_id, now_iso),
+               "parse_mode": "HTML", "disable_web_page_preview": True}
+    if len(message["text"]) > TELEGRAM_MAX_CHARS:
+        # Khong cat ngang chuoi HTML (the dang do se bi Telegram tu choi -> mat canh bao): gui ban van ban thuong.
+        message = {"chat_id": chat_id,
+                   "text": _render_alert(severity, rule, details, inc_id, now_iso)[:TELEGRAM_MAX_CHARS]}
     try:
-        body = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+        body = json.dumps(message).encode("utf-8")
         req = urllib.request.Request(
             f"https://api.telegram.org/bot{token}/sendMessage",
             data=body,
@@ -186,7 +245,7 @@ def send_telegram_alert(severity: str, rule: str, details: dict, inc_id: str, no
 
 # =========================================================== Incident sink
 def _render_alert(severity: str, rule: str, details: dict, inc_id: str, now_iso: str) -> str:
-    """Mot dinh dang duy nhat cho moi kenh (SNS email, Telegram)."""
+    """Van ban thuong: noi dung email SNS, va ban du phong cho Telegram khi tin HTML qua dai (_render_telegram)."""
     return (
         f"[LogSentinel {severity}] {rule}\n"
         f"Thoi gian: {now_iso}\n"
@@ -345,6 +404,21 @@ def evaluate_webapp_log(raw_message: str) -> None:
         record_incident("SQL_INJECTION", "CRITICAL", data, raw_message)
         auto_block_attacker_ip(client_ip, "Phat hien payload SQL Injection / Path Traversal")
 
+    elif event_type == "NOT_FOUND":
+        # Do quet: 1 IP goi nhieu duong dan khong ton tai (/.env, /wp-admin, /phpmyadmin...) trong thoi gian ngan.
+        if not table:
+            return
+        ip = _blockable_ip(client_ip) or str(client_ip)[:64]
+        try:
+            count = count_in_window(f"STATE#NOT_FOUND#{ip}", SCAN_WINDOW_S)
+        except Exception as exc:
+            print(f"[ERROR] Scan state tracking failed: {type(exc).__name__}")
+            return
+        if count == SCAN_THRESHOLD:
+            record_incident("SCAN_DETECTED", "HIGH",
+                            {**data, "attempt_count": count, "window_seconds": SCAN_WINDOW_S}, raw_message)
+            auto_block_attacker_ip(client_ip, f"Do quet: {count} duong dan khong ton tai / {SCAN_WINDOW_S}s")
+
     elif event_type == "FAILED_LOGIN":
         ip = _blockable_ip(client_ip) or str(client_ip)[:64]
         if not table:
@@ -359,11 +433,31 @@ def evaluate_webapp_log(raw_message: str) -> None:
             record_incident("BRUTE_FORCE_DETECTED", "HIGH",
                             {**data, "attempt_count": count, "window_seconds": BRUTE_FORCE_WINDOW_S}, raw_message)
             auto_block_attacker_ip(client_ip, f"Brute-force: {count} lan sai / {BRUTE_FORCE_WINDOW_S}s")
-        # IP da cham nguong thi da co canh bao rieng o tren: khong tinh tiep vao hai bo dem ben duoi,
+        # IP da cham nguong thi da co canh bao rieng o tren: khong tinh tiep vao 2 bo dem THEO IP / TAI KHOAN,
         # de 1 IP don le khong sinh 2 canh bao cho cung 1 cuoc tan cong.
         if count < BRUTE_FORCE_THRESHOLD:
             _track_slow_brute_force(data, ip, client_ip, raw_message)
             _track_account_under_attack(data, raw_message)
+        # Spike la TONG cua ca he thong: dem moi lan sai, ke ca tu IP da bi khoa (spec: "bat ke IP hay tai khoan").
+        _track_login_failure_spike(data, raw_message)
+
+
+def _track_login_failure_spike(data: dict, raw_message: str) -> None:
+    """
+    SPIKE toan he thong: tong so dang nhap sai tang dot bien, bat ke IP hay tai khoan nao. Bat kieu
+    "credential stuffing" - moi IP va moi tai khoan chi thu 1 lan nen ca hai bo dem kia deu khong thay.
+    Chi canh bao: khong co IP don le nao dang trach.
+    """
+    try:
+        count = count_in_window("STATE#FAILED_LOGIN_GLOBAL", LOGIN_SPIKE_WINDOW_S)
+    except Exception as exc:
+        print(f"[ERROR] Spike state tracking failed: {type(exc).__name__}")
+        return
+    if count == LOGIN_SPIKE_THRESHOLD + 1:   # "vuot 50" = lan thu 51; bang dung 1 lan / cua so -> 1 canh bao
+        record_incident("LOGIN_FAILURE_SPIKE", "HIGH", {
+            "attempt_count": count, "window_seconds": LOGIN_SPIKE_WINDOW_S,
+            "last_ip": data.get("client_ip"), "last_username": data.get("username"),
+        }, raw_message)
 
 
 def _track_slow_brute_force(data: dict, ip: str, client_ip, raw_message: str) -> None:

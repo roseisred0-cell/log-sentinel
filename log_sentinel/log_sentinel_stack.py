@@ -28,8 +28,12 @@ from aws_cdk import (
     aws_events as events,
     aws_events_targets as events_targets,
     aws_budgets as budgets,
+    aws_glue as glue,
+    aws_athena as athena,
 )
 from constructs import Construct
+
+from log_sentinel import cloudtrail_athena
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -57,7 +61,9 @@ class LogSentinelConfig:
         cdk deploy -c alert_email=soc@example.com -c admin_cidr=203.0.113.10/32
     """
     PROJECT_NAME = "LogSentinel"
-    LOG_RETENTION_DAYS = logs.RetentionDays.ONE_WEEK
+    # 30 ngay: khop voi log CloudTrail tren S3 (S3_EXPIRATION_DAYS). Phi luu tru CloudWatch rat nho so voi phi ghi,
+    # nen giu lau hon gan nhu khong ton them, ma tan cong phat hien muon van con log de dieu tra.
+    LOG_RETENTION_DAYS = logs.RetentionDays.ONE_MONTH
     S3_EXPIRATION_DAYS = 30
 
     def __init__(self, scope: Construct):
@@ -108,6 +114,7 @@ class LogSentinelStack(Stack):
 
         self._build_security_and_storage()
         self._build_log_ingestion()
+        self._build_log_analytics()
         self._build_detection_and_alerting()
         self._build_user_directory()
         self._build_target_ec2_vm()
@@ -216,6 +223,83 @@ class LogSentinelStack(Stack):
         else:
             Annotations.of(self).add_warning(
                 "Log app KHONG duoc archive xuong S3 (Firehose tat). Bat: cdk deploy -c enable_app_log_archive=true")
+
+    def _build_log_analytics(self) -> None:
+        """Athena tren log CloudTrail da luu o S3: truy van SQL cho dieu tra va so lieu bao cao (khong can may chu)."""
+        self.analytics_db = glue.CfnDatabase(
+            self, "AnalyticsDatabase",
+            catalog_id=self.account,
+            database_input={"name": "logsentinel", "description": "LogSentinel: log luu tru de truy van bang Athena"},
+        )
+        self.cloudtrail_table = glue.CfnTable(
+            self, "CloudTrailAthenaTable",
+            catalog_id=self.account,
+            database_name="logsentinel",
+            table_input=cloudtrail_athena.table_input(self.archive_bucket.bucket_name, self.account),
+        )
+        self.cloudtrail_table.node.add_dependency(self.analytics_db)
+
+        # Workgroup rieng: ket qua nam trong bucket luu tru (tu xoa sau 30 ngay cung voi log), va moi truy van
+        # bi chan o 1 GB du lieu quet - mot cau SQL quen dieu kien ngay khong the dot tien.
+        self.athena_workgroup = athena.CfnWorkGroup(
+            self, "AthenaWorkGroup",
+            name="logsentinel",
+            description="Truy van log LogSentinel",
+            recursive_delete_option=True,
+            work_group_configuration={
+                "enforceWorkGroupConfiguration": True,
+                "bytesScannedCutoffPerQuery": 1024 ** 3,
+                "publishCloudWatchMetricsEnabled": False,
+                "resultConfiguration": {
+                    "outputLocation": f"s3://{self.archive_bucket.bucket_name}/athena-results/",
+                    "encryptionConfiguration": {"encryptionOption": "SSE_S3"},
+                },
+            },
+        )
+
+        for index, (name, description, sql) in enumerate(cloudtrail_athena.NAMED_QUERIES):
+            query = athena.CfnNamedQuery(
+                self, f"AthenaQuery{index}",
+                name=name, description=description, database="logsentinel",
+                work_group="logsentinel", query_string=sql,
+            )
+            query.node.add_dependency(self.athena_workgroup)
+            query.node.add_dependency(self.cloudtrail_table)
+
+        # Quyen cho nguoi lam bao cao / dieu tra: chay truy van trong workgroup nay va DOC log. Khong sua, khong xoa.
+        # Gan tay cho IAM user can dung:  aws iam attach-user-policy --user-name <user> --policy-arn <AthenaAnalystPolicyArn>
+        bucket_arn = self.archive_bucket.bucket_arn
+        glue_arn = f"arn:{self.partition}:glue:{self.region}:{self.account}"
+        self.athena_analyst_policy = iam.ManagedPolicy(
+            self, "AthenaAnalystPolicy",
+            managed_policy_name="LogSentinel-AthenaAnalyst",
+            description="Chay truy van Athena tren log LogSentinel, chi doc",
+            statements=[
+                iam.PolicyStatement(
+                    actions=["athena:StartQueryExecution", "athena:StopQueryExecution", "athena:GetQueryExecution",
+                             "athena:GetQueryResults", "athena:ListQueryExecutions", "athena:GetWorkGroup",
+                             "athena:ListNamedQueries", "athena:GetNamedQuery", "athena:BatchGetNamedQuery"],
+                    resources=[f"arn:{self.partition}:athena:{self.region}:{self.account}:workgroup/logsentinel"]),
+                iam.PolicyStatement(
+                    actions=["glue:GetDatabase", "glue:GetTable", "glue:GetTables", "glue:GetPartitions"],
+                    resources=[f"{glue_arn}:catalog", f"{glue_arn}:database/logsentinel",
+                               f"{glue_arn}:table/logsentinel/*"]),
+                iam.PolicyStatement(
+                    actions=["s3:GetBucketLocation", "s3:ListBucket"], resources=[bucket_arn]),
+                iam.PolicyStatement(
+                    actions=["s3:GetObject"],
+                    resources=[f"{bucket_arn}/AWSLogs/*", f"{bucket_arn}/athena-results/*"]),
+                iam.PolicyStatement(
+                    actions=["s3:PutObject", "s3:AbortMultipartUpload"],
+                    resources=[f"{bucket_arn}/athena-results/*"]),
+                # Log CloudTrail tren S3 duoc ma hoa bang CMK.
+                iam.PolicyStatement(actions=["kms:Decrypt"], resources=[self.kms_key.key_arn]),
+            ],
+        )
+        CfnOutput(self, "AthenaWorkGroupName", value="logsentinel",
+                  description="Athena: chon workgroup nay, database logsentinel, bang cloudtrail_logs")
+        CfnOutput(self, "AthenaAnalystPolicyArn", value=self.athena_analyst_policy.managed_policy_arn,
+                  description="Gan cho IAM user lam bao cao: aws iam attach-user-policy --user-name <user> --policy-arn <arn>")
 
     def _archive_app_logs_to_s3(self) -> None:
         """Buoc 3 ke hoach: log ung dung -> Firehose -> S3 (prefix app-logs/), luu 30 ngay de dieu tra."""
