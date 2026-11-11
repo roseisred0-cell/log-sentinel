@@ -11,7 +11,11 @@ WorkingDirectory=/opt/logsentinel/app
 EnvironmentFile=/etc/logsentinel/runtime.env
 EnvironmentFile=/etc/logsentinel/webapp.env
 # Bind loopback: cong 8080 khong bao gio lo ra Internet, ke ca khi SG bi mo nham.
-ExecStart=/opt/logsentinel/venv/bin/gunicorn --workers 4 --bind 127.0.0.1:8080 --timeout 30 'app:create_app()'
+# Worker da luong (gthread): moi request cho AWS tra loi (Cognito, DynamoDB) chi giu 1 luong, khong giu ca
+# worker. Truoc day 4 worker dong bo = 4 lan dang nhap dong thoi la het cho; nay 2 x 16 = 32 request dong thoi.
+# It worker hon cung lam bo dem "chan tai cho" (nam rieng tung worker) chinh xac hon.
+ExecStart=/opt/logsentinel/venv/bin/gunicorn --worker-class gthread --workers 2 --threads 16 \
+    --bind 127.0.0.1:8080 --timeout 30 --keep-alive 5 'app:create_app()'
 Restart=always
 RestartSec=5s
 

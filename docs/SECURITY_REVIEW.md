@@ -114,11 +114,87 @@ Con số ~$2.15/tháng trong handover đang bỏ sót mấy khoản:
 - Metric EMF `IncidentsDetected` (2 chiều Severity) cộng 2 metric filter vẫn nằm trong 10 custom metric miễn phí.
 - Không có NAT Gateway, vì EC2 nằm ở public subnet và chỉ mở 443.
 
+## 6b. Bổ sung v2.3 (11/11/2026)
+
+- **SOC Console** tại `/console`: đăng nhập mật khẩu + OTP, cookie phiên `Secure` / `HttpOnly` / `SameSite=Strict`, CSRF token cho thao tác ghi, CSP `default-src 'self'`, dữ liệu chèn bằng `textContent` (payload tấn công không thể chạy trong trình duyệt của quản trị viên).
+- **GSI `by_type`** để Console liệt kê sự cố bằng Query. EC2 chỉ được `DeleteItem` với khóa `BLOCKED_IP#*`, không xóa được bản ghi sự cố.
+- **Firehose → S3** cho log ứng dụng (Bước 3 của kế hoạch).
+- **Luật `ROOT_ACCOUNT_LOGIN`** (CRITICAL).
+- **Giới hạn concurrency cho Lambda**: tùy chọn, `-c detector_max_concurrency=5`. Mặc định tắt vì tài khoản mới thường không đủ quota để reserve.
+- Chi phí thêm: Firehose tính theo GB ingest (lượng log lab rất nhỏ), GSI tính theo lượt ghi/đọc on-demand.
+
+## 6c. Bổ sung v2.4: tài khoản người dùng bằng Amazon Cognito
+
+- **Đăng ký + xác nhận email**, chính sách mật khẩu của Cognito (≥ 8 ký tự, hoa/thường/số). Giao diện chấm 5 mức độ mạnh; máy chủ chấm lại cùng quy tắc và từ chối dưới *Trung bình* (không tin trình duyệt).
+- **2FA TOTP tùy chọn** (`Mfa.OPTIONAL`, không SMS): người dùng tự bật/tắt; sự kiện `MFA_ENABLED` / `MFA_DISABLED` được ghi log để kiểm toán.
+- **Vai trò = nhóm Cognito** (`soc-viewers`, `soc-admins`). Người mới đăng ký **không thuộc nhóm nào → "Chờ duyệt"**, không đọc được dữ liệu sự cố (nếu không, bất kỳ ai trên Internet cũng đăng ký được rồi xem IP/payload của khách).
+- Brute-force/OTP sai trên tài khoản Cognito đi qua đúng các luật Detector sẵn có (`FAILED_LOGIN`, `MFA_BYPASS_ATTEMPT`); đăng ký/xác nhận có giới hạn tốc độ theo IP; phản hồi đăng ký/gửi lại mã giống nhau dù email đã tồn tại hay chưa (chống dò email).
+- Phiên Cognito hết hạn tuyệt đối sau 30 phút (vai trò chỉ đọc lúc đăng nhập → thu hồi quyền có hiệu lực ≤ 30 phút).
+- **Quên mật khẩu** qua mã email (Cognito `ForgotPassword`): phản hồi giống nhau cho email có/không tồn tại, giới hạn 5 yêu cầu và 10 lần thử mã / 10 phút / IP, mật khẩu mới phải đạt tối thiểu *Trung bình*.
+- **Tắt 2FA phải xác minh lại**: yêu cầu mật khẩu + OTP hiện tại. Cognito không cho kiểm tra riêng một mã TOTP nên máy chủ đăng nhập lại để Cognito tự hỏi thử thách MFA (chặt hơn chỉ hỏi OTP). Sai → `FAILED_LOGIN`, đi qua luật brute-force sẵn có. Kẻ chỉ có cookie phiên không tắt được 2FA.
+- Tài khoản `admin` nội bộ (mật khẩu + TOTP trong `webapp.env`) giữ làm tài khoản dự phòng khi Cognito/email gặp sự cố.
+
+## 6d. Bổ sung v2.5: đợt red-team (`tests/unit/test_redteam_scenarios.py`)
+
+Chạy: `python -m pytest tests/unit/test_redteam_scenarios.py -v`. Mỗi nhóm test là một mục tiêu của kẻ tấn công.
+
+| Phát hiện | Mức | Đã xử lý |
+|---|---|---|
+| 24/41 payload SQLi/path traversal lọt bộ lọc (mã hóa kép `%2527`, `1 AND 1=1`, `/etc/passwd`, `xp_cmdshell`, `pg_sleep`, byte NUL, UTF-8 overlong) | Cao | Chuẩn hóa đầu vào (giải mã URL tới 3 vòng, NFKC, bỏ ký tự vô hình) rồi so 20 mẫu. 0/41 lọt, 0/28 câu bình thường bị chặn nhầm |
+| Payload đặt ở ô tên đăng nhập / email không bị quét | Trung bình | Quét cả hai ô, ghi `SQL_INJECTION` kèm `field` |
+| Khoảng trễ phát hiện brute-force: web app chờ Lambda (vài giây đến vài chục giây), trong lúc đó đoán được ~200 lần | Cao | Web app tự chặn tạm ở lần sai thứ 5; Nginx giới hạn riêng 30 lần/phút cho `/login`, `/auth/*`, `/setup-2fa` |
+| Brute-force phân tán (nhiều IP, mỗi IP dưới ngưỡng) không có cảnh báo | Cao | Luật `ACCOUNT_UNDER_ATTACK`: đếm theo tên tài khoản |
+| Đăng nhập AWS Console **thất bại** bị gán nhầm là `CONSOLE_LOGIN_NO_MFA`; không có luật brute-force Console | Trung bình | Tách riêng; thêm `CONSOLE_BRUTE_FORCE` |
+| Chỉ bắt leo thang quyền qua *user*; bỏ sót role, group, đặt mật khẩu cho user khác, sửa trust policy | Cao | 9 sự kiện IAM mới + `KMS_KEY_TAMPERING` (vô hiệu hóa CMK là làm mù cả hệ thống) |
+| `POST /api/unblock` với body là số/mảng → HTTP 500 | Thấp | Trả 400 |
+| Token `/setup-2fa?token=…` bị ghi vào access log của Nginx | Trung bình | `log_format` ghi `$uri` (không có query string) |
+| Ký tự ngắt dòng Unicode (U+2028) trong tên đăng nhập được ghi nguyên vào log | Thấp | Log thuần ASCII |
+| Luật trong Detector và bộ lọc subscription có thể lệch nhau (luật "chết") | Thấp | Một danh sách `CLOUDTRAIL_WATCHED_EVENTS` + test đối chiếu hai chiều |
+
+Hệ quả cần biết: `cdk deploy` có sửa IAM role sẽ sinh cảnh báo `IAM_*` (đánh dấu `via_service`). Cố ý không bỏ qua, vì CloudFormation là một đường leo thang quyền quen thuộc.
+
+## 6e. Bổ sung v2.6: chống DDoS và lớp biên (`log_sentinel/edge_stack.py`, `lambda_src/waf_sync.py`)
+
+| Hạng mục | Cách làm |
+|---|---|
+| Thu hẹp ai vào được | Chế độ edge: security group chỉ mở cổng 80 cho dải IP CloudFront (prefix list); Nginx kiểm tra thêm header bí mật `X-Origin-Verify` (lấy từ Secrets Manager lúc khởi động). Tùy chọn `console_cidrs`: luật WAF chỉ cho dải IP đó vào `/console`, `/api/`, `/auth/`, `/login`, `/setup-2fa` |
+| Trần chi phí | AWS Budgets gửi email khi chi tiêu tháng đạt 80% và khi dự báo vượt 100% (`monthly_budget_usd`, mặc định 20). `detector_max_concurrency` vẫn là tùy chọn vì tài khoản mới không đủ quota |
+| Worker đa luồng | Gunicorn `gthread` 2 × 16: một request chờ Cognito/DynamoDB chỉ giữ một luồng. Mỗi luồng có `Table` boto3 riêng (resource không an toàn khi dùng chung giữa các luồng) |
+| CloudFront + WAF | Luật theo thứ tự: IP bị SOAR khóa → (tùy chọn) allowlist Console → 100 request/5 phút/IP vào đường dẫn đăng nhập → 2000 request/5 phút/IP → danh sách IP xấu của AWS → Known Bad Inputs. Cố ý **không** bật bộ luật SQLi của AWS ở chế độ chặn: nếu WAF chặn hết thì web app không còn ghi `SQL_INJECTION` và Detector không thấy gì |
+| IP bị khóa lên WAF | `waf_sync` chạy mỗi phút, là nơi duy nhất ghi vào IP set: khóa mới, hết hạn 24 giờ và gỡ khóa từ Console đều tự đồng bộ. Lọc từng địa chỉ (một địa chỉ sai làm WAF từ chối cả danh sách; `/0` sẽ chặn cả Internet). Lỗi liên tục → alarm |
+
+Vá thêm hai điểm yếu của đợt red-team:
+
+- **Brute-force chậm** → luật `SLOW_BRUTE_FORCE` (20 lần sai / 1 giờ / IP).
+- **Cookie dùng lại sau đăng xuất** → đăng xuất ghi `REVOKED_SESSION#<sid>` vào DynamoDB; mọi worker từ chối cookie đó trong ≤ 15 giây. Thêm tuổi thọ tuyệt đối 8 giờ cho phiên `admin` nội bộ (trước đây cookie được gia hạn vô hạn).
+
+Giới hạn của chế độ edge cần biết:
+
+- Chặng CloudFront → máy là HTTP (cổng 80) trong mạng AWS, không mã hóa. Muốn mã hóa đầu-cuối cần tên miền riêng + chứng chỉ ACM trên máy hoặc ALB.
+- WAF giới hạn tốc độ có độ trễ khoảng 30–60 giây và vẫn tính theo IP: botnet đủ lớn, mỗi IP dưới ngưỡng, vẫn đi qua. Đây là giảm thiểu, không phải miễn nhiễm.
+- IP bị khóa lên WAF chậm tối đa 1 phút; trong lúc đó web app tự chặn như cũ.
+
 ## 7. Rủi ro còn lại (ghi vào báo cáo để thể hiện tư duy)
 
-- Chứng chỉ TLS tự ký chỉ dùng cho lab. Production thì dùng ALB + ACM, có thể thêm AWS WAF.
+Ba mục đầu có test `xfail(strict)` ở nhóm G của bộ red-team: khi ai đó vá xong, test sẽ báo.
+
+- **Cạn hạn mức email**: giới hạn đăng ký/quên mật khẩu tính theo IP. Một botnet ~50 IP làm hết hạn mức email mặc định của Cognito trong ngày, người thật không nhận được mã. Cần SES + CAPTCHA/WAF.
+- **Khóa oan theo NAT**: SOAR khóa theo IP, nên người dùng chung Wi-Fi/NAT với kẻ tấn công cũng bị khóa 24 giờ.
+- **Máy web bị chiếm thì giả được sự kiện**: EC2 có quyền ghi vào log group của chính nó, Detector tin mọi dòng trong đó → kẻ chiếm máy có thể khiến hệ thống khóa IP bất kỳ (trừ `admin_cidr`).
+- Bộ đếm "chặn tại chỗ" nằm riêng từng Gunicorn worker: trường hợp xấu nhất kẻ tấn công đoán được ~9 lần (2 worker) trước khi bị chặn, thay vì 5.
+- **Chưa có cách tích hợp cho ứng dụng của khách**: hệ thống vẫn chỉ giám sát ứng dụng mẫu của chính nó. Đây là rào cản lớn nhất để thương mại hóa (cần thư viện/middleware ghi log đúng chuẩn và kiểm tra danh sách chặn).
+- **Console chạy chung máy với ứng dụng được bảo vệ** và chỉ có một máy, không có dự phòng.
+- Bộ lọc SQLi là danh sách mẫu (regex), không phải bộ phân tích cú pháp: payload mới chưa có trong danh sách vẫn có thể lọt. Đây là lớp phát hiện, không thay được truy vấn tham số hóa trong ứng dụng thật.
+
+- Role EC2 có quyền `AdminAddUserToGroup` / `AdminRemoveUserFromGroup` trên đúng user pool (để duyệt người dùng ngay trong Console). Vì Console chạy chung máy với app mục tiêu, kẻ chiếm được máy có thể tự duyệt tài khoản của mình lên *viewer* (đọc dữ liệu). Web app cố ý không cho nâng quyền admin; bản thương mại nên tách Console/duyệt người dùng ra dịch vụ riêng.
+- Cognito dùng email mặc định (tối đa ~50 mã/ngày, gồm cả mã đăng ký và mã quên mật khẩu). Bản thương mại nên cấu hình SES.
+- Giới hạn tốc độ đăng ký/quên mật khẩu nằm trong RAM từng Gunicorn worker (thực tế ≈ 4 × giới hạn).
+- Access token Cognito nằm trong cookie phiên (đã ký, `HttpOnly`, `Secure`, nhưng không mã hóa).
+
+- Chế độ trực tiếp dùng chứng chỉ TLS tự ký, chỉ cho lab. Production dùng chế độ edge (`-c enable_edge=true`).
 - TOTP chưa chống replay trong cùng 30 giây.
 - Cache chặn nằm riêng trong từng Gunicorn worker. Một IP bị khóa ở worker A vẫn có thể lọt vào worker B trong tối đa 5 giây, cho tới khi Lambda ghi xong DynamoDB.
-- Chưa có luật cho việc dùng root account (CIS 1.7) và chưa giới hạn `reserved_concurrency` cho Lambda. Đây là hai việc nên làm tiếp nếu còn thời gian trước 20/11.
+- Luật root mới chỉ bắt lần đăng nhập Console; chưa bắt lời gọi API bằng access key của root.
+- SOC Console chạy chung máy với ứng dụng mục tiêu và chỉ có một tài khoản quản trị.
 - SNS topic chưa mã hóa KMS.
 - `cdk.context.json` chứa VPC ID và Account ID thật. Che đi trước khi để repo public.

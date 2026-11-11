@@ -36,11 +36,19 @@ print("APP_SETUP_TOKEN=" + secrets.token_urlsafe(32))
 PY
   )
 fi
+# Khoa ky cookie phien cho SOC Console (them neu file cu chua co).
+if ! grep -q '^APP_SESSION_SECRET=' "$ENV_DIR/webapp.env"; then
+  ( umask 077
+    echo "APP_SESSION_SECRET=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')" >> "$ENV_DIR/webapp.env" )
+fi
+# Cognito (tuy chon): de trong -> console chi con tai khoan admin noi bo. ID nay khong phai bi mat.
 cat > "$ENV_DIR/runtime.env" <<RT
 INCIDENT_TABLE=$INCIDENT_TABLE
 AWS_DEFAULT_REGION=$AWS_REGION
 TRUST_PROXY=true
 APP_LOG_PATH=/var/log/webapp/access.log
+COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID:-}
+COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID:-}
 RT
 chown root:webapp "$ENV_DIR"/*.env
 chmod 0640 "$ENV_DIR"/*.env
@@ -55,6 +63,22 @@ if [ ! -s /etc/pki/nginx/logsentinel.crt ]; then
 fi
 
 install -m 0644 "$DEPLOY/nginx.conf" /etc/nginx/nginx.conf
+if [ "${EDGE_MODE:-false}" = "true" ]; then
+  # Sau CloudFront: chi nhan request mang header bi mat. Bi mat lay tu Secrets Manager bang role cua may,
+  # khong nam trong UserData / CloudFormation template cua may nay. Chi root (nginx master) doc duoc file.
+  : "${ORIGIN_SECRET_ARN:?EDGE_MODE=true can ORIGIN_SECRET_ARN}"
+  ORIGIN_SECRET="$(aws secretsmanager get-secret-value --region "$AWS_REGION" \
+    --secret-id "$ORIGIN_SECRET_ARN" --query SecretString --output text)"
+  case "$ORIGIN_SECRET" in
+    ""|*[!A-Za-z0-9]*) echo "[LogSentinel] origin secret rong hoac co ky tu la" >&2; exit 1 ;;
+  esac
+  ( umask 077
+    sed "s/__ORIGIN_VERIFY_SECRET__/$ORIGIN_SECRET/" "$DEPLOY/nginx-listener-edge.conf" \
+      > /etc/nginx/logsentinel-listener.conf )
+  unset ORIGIN_SECRET
+else
+  install -m 0644 "$DEPLOY/nginx-listener-direct.conf" /etc/nginx/logsentinel-listener.conf
+fi
 nginx -t
 
 install -m 0644 "$DEPLOY/webapp.service" /etc/systemd/system/webapp.service

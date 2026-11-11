@@ -193,3 +193,29 @@ def test_incident_metric_emitted_in_emf(det, capsys):
     det.record_incident("SQL_INJECTION", "CRITICAL", {}, "raw")
     emf = [json.loads(l) for l in capsys.readouterr().out.splitlines() if l.startswith('{"_aws"')]
     assert emf and emf[0]["IncidentsDetected"] == 1 and emf[0]["Severity"] == "CRITICAL"
+
+
+# ------------------------------------------------------ bo sung v2.3
+def _items(det):
+    return [c.kwargs["Item"] for c in det.table.put_item.call_args_list]
+
+
+def test_incident_and_block_carry_record_type_for_console_index(det):
+    det.evaluate_webapp_log(json.dumps({"event_type": "SQL_INJECTION", "client_ip": "203.0.113.5"}))
+    assert [i["record_type"] for i in _items(det)] == ["INCIDENT", "BLOCK"]
+
+
+def test_root_console_login_is_critical_even_with_mfa(det):
+    det.evaluate_cloudtrail_log(json.dumps({
+        "eventName": "ConsoleLogin", "userIdentity": {"type": "Root"},
+        "additionalEventData": {"MFAUsed": "Yes"}, "sourceIPAddress": "203.0.113.5"}))
+    item = _items(det)[0]
+    assert item["rule"] == "ROOT_ACCOUNT_LOGIN" and item["severity"] == "CRITICAL"
+    assert len(_items(det)) == 1  # khong ghi trung voi CONSOLE_LOGIN_NO_MFA
+
+
+def test_iam_user_login_with_mfa_is_not_an_incident(det):
+    det.evaluate_cloudtrail_log(json.dumps({
+        "eventName": "ConsoleLogin", "userIdentity": {"type": "IAMUser", "userName": "dev"},
+        "additionalEventData": {"MFAUsed": "Yes"}}))
+    det.table.put_item.assert_not_called()

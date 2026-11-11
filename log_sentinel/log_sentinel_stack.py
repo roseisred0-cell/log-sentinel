@@ -21,12 +21,34 @@ from aws_cdk import (
     aws_cloudwatch_actions as cw_actions,
     aws_ec2 as ec2,
     aws_s3_assets as s3_assets,
+    aws_kinesisfirehose as firehose,
+    aws_cognito as cognito,
+    aws_cloudfront as cloudfront,
+    aws_cloudfront_origins as origins,
+    aws_events as events,
+    aws_events_targets as events_targets,
+    aws_budgets as budgets,
 )
 from constructs import Construct
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 WEBAPP_DIR = ROOT_DIR / "sample_app"
+
+# Ten su kien CloudTrail duoc chuyen toi Detector. PHAI chua moi su kien ma lambda_src/detector.py co luat
+# (tests/unit/test_stack_hardening.py kiem tra dieu nay): su kien khong nam o day se khong bao gio toi Lambda.
+CLOUDTRAIL_WATCHED_EVENTS = (
+    "ConsoleLogin",
+    "DeactivateMFADevice", "DeleteVirtualMFADevice",
+    "StopLogging", "DeleteTrail",
+    "ScheduleKeyDeletion", "DisableKey",
+    "CreateAccessKey",
+    "AttachUserPolicy", "AttachRolePolicy", "AttachGroupPolicy",
+    "PutUserPolicy", "PutRolePolicy", "PutGroupPolicy",
+    "CreatePolicyVersion", "UpdateAssumeRolePolicy",
+    "CreateLoginProfile", "UpdateLoginProfile",
+    "AddUserToGroup",
+)
 
 
 class LogSentinelConfig:
@@ -47,18 +69,51 @@ class LogSentinelConfig:
         self.admin_cidr = ctx("admin_cidr", "LOGSENTINEL_ADMIN_CIDR")
         # Ai duoc goi HTTPS 443 toi may muc tieu (mac dinh Internet de demo tan cong).
         self.ingress_cidr = ctx("ingress_cidr", "LOGSENTINEL_INGRESS_CIDR", "0.0.0.0/0")
+        # Tran so Lambda chay song song (chong Denial of Wallet khi bi flood log). Mac dinh TAT vi
+        # tai khoan moi thuong chi co quota 10 concurrency, khong du de "reserve" -> deploy se loi.
+        # Bat: cdk deploy -c detector_max_concurrency=5  (can quota tai khoan >= 105)
+        raw = ctx("detector_max_concurrency", "LOGSENTINEL_DETECTOR_MAX_CONCURRENCY")
+        self.detector_max_concurrency = int(raw) if raw.isdigit() and int(raw) > 0 else None
+        # Luu tru log app xuong S3 qua Firehose. Mac dinh TAT vi tai khoan moi/chua kich hoat day du se
+        # bi loi "The AWS Access Key Id needs a subscription for the service (Firehose)" luc deploy.
+        # Bat: cdk deploy -c enable_app_log_archive=true  (sau khi tai khoan dung duoc Firehose)
+        self.enable_app_log_archive = ctx(
+            "enable_app_log_archive", "LOGSENTINEL_ENABLE_APP_LOG_ARCHIVE").lower() in ("1", "true", "yes")
+        # Canh bao chi phi (AWS Budgets) gui toi alert_email khi chi tieu thuc te cua TAI KHOAN dat 80% va khi
+        # du bao vuot 100% muc nay. Bao ve vi tien khi bi tan cong lam phat sinh Lambda/DynamoDB/WAF.
+        # Tat: cdk deploy -c monthly_budget_usd=0
+        raw = ctx("monthly_budget_usd", "LOGSENTINEL_MONTHLY_BUDGET_USD", "20")
+        self.monthly_budget_usd = int(raw) if raw.isdigit() else 0
+
+
+def edge_enabled(scope: Construct) -> bool:
+    """cdk deploy --all -c enable_edge=true : dat CloudFront + WAF truoc may (xem log_sentinel/edge_stack.py)."""
+    raw = scope.node.try_get_context("enable_edge") or os.environ.get("LOGSENTINEL_ENABLE_EDGE") or ""
+    return str(raw).strip().lower() in ("1", "true", "yes")
+
+
+def console_cidrs(scope: Construct) -> list:
+    """-c console_cidrs=203.0.113.0/24,198.51.100.7/32 : chi cac dai nay vao duoc Console (luat WAF, che do edge)."""
+    raw = scope.node.try_get_context("console_cidrs") or os.environ.get("LOGSENTINEL_CONSOLE_CIDRS") or ""
+    return [c.strip() for c in str(raw).split(",") if c.strip()]
 
 
 class LogSentinelStack(Stack):
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+    def __init__(self, scope: Construct, construct_id: str, edge=None, **kwargs) -> None:
+        """`edge`: LogSentinelEdgeStack (us-east-1) hoac None. Co edge -> nguoi dung vao qua CloudFront + WAF,
+        may chi nhan ket noi tu CloudFront. Khong co -> Internet vao thang may qua TLS tu ky (lab)."""
         super().__init__(scope, construct_id, **kwargs)
         self.cfg = LogSentinelConfig(self)
+        self.edge = edge
 
         self._build_security_and_storage()
         self._build_log_ingestion()
         self._build_detection_and_alerting()
+        self._build_user_directory()
         self._build_target_ec2_vm()
+        self._build_edge_distribution()
         self._build_alarms()
+        self._build_cost_guard()
         self._build_monitoring_dashboard()
         self._export_outputs()
 
@@ -107,6 +162,14 @@ class LogSentinelStack(Stack):
             time_to_live_attribute="ttl",
             removal_policy=RemovalPolicy.DESTROY
         )
+        # GSI thua (sparse): chi item co record_type (INCIDENT / BLOCK) moi vao index.
+        # SOC Console dung Query tren index nay thay vi Scan ca bang.
+        self.incident_table.add_global_secondary_index(
+            index_name="by_type",
+            partition_key=dynamodb.Attribute(name="record_type", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="timestamp", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
 
         self.telegram_secret = secretsmanager.Secret(
             self, "TelegramBotSecret",
@@ -148,6 +211,56 @@ class LogSentinelStack(Stack):
             encryption_key=self.kms_key,
         )
 
+        if self.cfg.enable_app_log_archive:
+            self._archive_app_logs_to_s3()
+        else:
+            Annotations.of(self).add_warning(
+                "Log app KHONG duoc archive xuong S3 (Firehose tat). Bat: cdk deploy -c enable_app_log_archive=true")
+
+    def _archive_app_logs_to_s3(self) -> None:
+        """Buoc 3 ke hoach: log ung dung -> Firehose -> S3 (prefix app-logs/), luu 30 ngay de dieu tra."""
+        delivery_role = iam.Role(
+            self, "AppLogFirehoseRole",
+            assumed_by=iam.ServicePrincipal("firehose.amazonaws.com"),
+        )
+        self.archive_bucket.grant_write(delivery_role)
+
+        self.app_log_stream = firehose.CfnDeliveryStream(
+            self, "AppLogArchiveStream",
+            delivery_stream_type="DirectPut",
+            delivery_stream_encryption_configuration_input=(
+                firehose.CfnDeliveryStream.DeliveryStreamEncryptionConfigurationInputProperty(
+                    key_type="AWS_OWNED_CMK")),
+            extended_s3_destination_configuration=firehose.CfnDeliveryStream.ExtendedS3DestinationConfigurationProperty(
+                bucket_arn=self.archive_bucket.bucket_arn,
+                role_arn=delivery_role.role_arn,
+                prefix="app-logs/!{timestamp:yyyy/MM/dd}/",
+                error_output_prefix="app-logs-errors/!{firehose:error-output-type}/!{timestamp:yyyy/MM/dd}/",
+                buffering_hints=firehose.CfnDeliveryStream.BufferingHintsProperty(
+                    interval_in_seconds=300, size_in_m_bs=5),
+                # CloudWatch Logs da gzip san tung ban ghi -> khong nen lan 2.
+                compression_format="UNCOMPRESSED",
+            ),
+        )
+        self.app_log_stream.node.add_dependency(delivery_role)
+
+        logs_to_firehose_role = iam.Role(
+            self, "AppLogSubscriptionRole",
+            assumed_by=iam.ServicePrincipal("logs.amazonaws.com"),
+        )
+        logs_to_firehose_role.add_to_policy(iam.PolicyStatement(
+            actions=["firehose:PutRecord", "firehose:PutRecordBatch"],
+            resources=[self.app_log_stream.attr_arn],
+        ))
+        archive_filter = logs.CfnSubscriptionFilter(
+            self, "AppLogArchiveSubscription",
+            log_group_name=self.app_log_group.log_group_name,
+            filter_pattern="",
+            destination_arn=self.app_log_stream.attr_arn,
+            role_arn=logs_to_firehose_role.role_arn,
+        )
+        archive_filter.node.add_dependency(logs_to_firehose_role)
+
     def _build_detection_and_alerting(self) -> None:
         self.alert_topic = sns.Topic(self, "SecurityAlertTopic", display_name="LogSentinel Alerts")
         if self.cfg.alert_email:
@@ -155,6 +268,11 @@ class LogSentinelStack(Stack):
         else:
             Annotations.of(self).add_warning(
                 "Chua co alert_email: SNS se khong gui email. Dung: cdk deploy -c alert_email=<email>")
+
+        if not self.cfg.admin_cidr:
+            Annotations.of(self).add_warning(
+                "Chua co admin_cidr: IP cua chinh ban co the bi SOAR khoa 24h khi go sai mat khau/OTP. "
+                "Dung: cdk deploy -c admin_cidr=<ip-cua-ban>/32")
 
         self.detector_log_group = logs.LogGroup(
             self, "DetectorLogGroup",
@@ -171,6 +289,7 @@ class LogSentinelStack(Stack):
             timeout=Duration.seconds(30),
             memory_size=256,
             log_group=self.detector_log_group,
+            reserved_concurrent_executions=self.cfg.detector_max_concurrency,
             environment={
                 "INCIDENT_TABLE": self.incident_table.table_name,
                 "SNS_TOPIC_ARN": self.alert_topic.topic_arn,
@@ -199,17 +318,45 @@ class LogSentinelStack(Stack):
             self, "CloudTrailSubscription",
             log_group=self.trail_log_group,
             destination=logs_destinations.LambdaDestination(self.detector_lambda),
-            filter_pattern=logs.FilterPattern.any_term(
-                "ConsoleLogin",
-                "DeactivateMFADevice",
-                "DeleteVirtualMFADevice",
-                "StopLogging",
-                "DeleteTrail",
-                "CreateAccessKey",
-                "AttachUserPolicy",
-                "PutUserPolicy"
-            )
+            filter_pattern=logs.FilterPattern.any_term(*CLOUDTRAIL_WATCHED_EVENTS)
         )
+
+    def _build_user_directory(self) -> None:
+        """Cognito cho SOC Console: tu dang ky + xac nhan email, 2FA TOTP TUY CHON (nguoi dung tu bat/tat).
+        Vai tro = nhom Cognito. Nguoi moi dang ky khong thuoc nhom nao -> 'cho duyet', chua xem duoc du lieu."""
+        self.user_pool = cognito.UserPool(
+            self, "ConsoleUserPool",
+            user_pool_name="LogSentinel-Console",
+            self_sign_up_enabled=True,
+            sign_in_aliases=cognito.SignInAliases(email=True),
+            auto_verify=cognito.AutoVerifiedAttrs(email=True),
+            standard_attributes=cognito.StandardAttributes(
+                email=cognito.StandardAttribute(required=True, mutable=False)),
+            password_policy=cognito.PasswordPolicy(
+                min_length=8, require_lowercase=True, require_uppercase=True,
+                require_digits=True, require_symbols=False),
+            mfa=cognito.Mfa.OPTIONAL,
+            mfa_second_factor=cognito.MfaSecondFactor(sms=False, otp=True),
+            account_recovery=cognito.AccountRecovery.EMAIL_ONLY,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        # Client cong khai (khong secret): web app goi USER_PASSWORD_AUTH tu may chu qua TLS.
+        self.user_pool_client = self.user_pool.add_client(
+            "ConsoleWebClient",
+            generate_secret=False,
+            auth_flows=cognito.AuthFlow(user_password=True),
+            prevent_user_existence_errors=True,
+            enable_token_revocation=True,
+            access_token_validity=Duration.minutes(30),
+            id_token_validity=Duration.minutes(30),
+            refresh_token_validity=Duration.hours(12),
+        )
+        for logical_id, group, text in (
+            ("SocViewersGroup", "soc-viewers", "Duoc xem su co va IP bi khoa (chi doc)"),
+            ("SocAdminsGroup", "soc-admins", "Xem + go khoa IP + duyet nguoi dung"),
+        ):
+            cognito.CfnUserPoolGroup(self, logical_id, user_pool_id=self.user_pool.user_pool_id,
+                                     group_name=group, description=text)
 
     def _build_target_ec2_vm(self) -> None:
         """Nginx TLS 443 -> Gunicorn 127.0.0.1:8080. Code + cau hinh ship bang S3 asset (khong nhoi vao UserData)."""
@@ -218,10 +365,25 @@ class LogSentinelStack(Stack):
         self.vm_sg = ec2.SecurityGroup(
             self, "TargetVmSecurityGroup",
             vpc=vpc,
-            description="LogSentinel target: chi HTTPS 443 qua Nginx. 8080 chi bind loopback.",
+            description="LogSentinel target: chi 1 cong vao qua Nginx. 8080 chi bind loopback.",
             allow_all_outbound=True
         )
-        self.vm_sg.add_ingress_rule(ec2.Peer.ipv4(self.cfg.ingress_cidr), ec2.Port.tcp(443), "HTTPS via Nginx")
+        if self.edge:
+            # Chi may chu CloudFront ket noi duoc: IP that cua may khong con la mat tan cong tu Internet.
+            # (Nginx con kiem tra them header bi mat, vi distribution cua nguoi khac cung nam trong dai IP nay.)
+            cloudfront_ips = ec2.PrefixList.from_lookup(
+                self, "CloudFrontOriginFacing", prefix_list_name="com.amazonaws.global.cloudfront.origin-facing")
+            self.vm_sg.add_ingress_rule(ec2.Peer.prefix_list(cloudfront_ips.prefix_list_id), ec2.Port.tcp(80),
+                                        "HTTP chi tu CloudFront")
+            self.origin_secret = secretsmanager.Secret(
+                self, "OriginVerifySecret",
+                description="Header bi mat CloudFront gui cho Nginx (X-Origin-Verify)",
+                generate_secret_string=secretsmanager.SecretStringGenerator(
+                    exclude_punctuation=True, include_space=False, password_length=48),
+                removal_policy=RemovalPolicy.DESTROY,
+            )
+        else:
+            self.vm_sg.add_ingress_rule(ec2.Peer.ipv4(self.cfg.ingress_cidr), ec2.Port.tcp(443), "HTTPS via Nginx")
 
         vm_role = iam.Role(
             self, "TargetVmRole",
@@ -236,12 +398,38 @@ class LogSentinelStack(Stack):
             actions=["logs:DescribeLogStreams"],
             resources=[self.app_log_group.log_group_arn],
         ))
-        # Web app chi can doc 1 khoa BLOCKED_IP#<ip> -> GetItem, khong Scan/Query ca bang.
+        # Web app: GetItem de kiem tra BLOCKED_IP#<ip>; SOC Console: Query tren GSI by_type (khong Scan).
         vm_role.add_to_policy(iam.PolicyStatement(
             actions=["dynamodb:GetItem"],
             resources=[self.incident_table.table_arn],
         ))
-        self.kms_key.grant_decrypt(vm_role)
+        vm_role.add_to_policy(iam.PolicyStatement(
+            actions=["dynamodb:Query"],
+            resources=[f"{self.incident_table.table_arn}/index/by_type"],
+        ))
+        # Go khoa tu Console: chi xoa duoc item BLOCKED_IP#..., KHONG xoa duoc ban ghi su co (bang chung).
+        vm_role.add_to_policy(iam.PolicyStatement(
+            actions=["dynamodb:DeleteItem"],
+            resources=[self.incident_table.table_arn],
+            conditions={"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["BLOCKED_IP#*"]}},
+        ))
+        # Dang xuat = ghi REVOKED_SESSION#<sid> de cookie bi danh cap khong dung lai duoc. Chi dung khoa nay.
+        vm_role.add_to_policy(iam.PolicyStatement(
+            actions=["dynamodb:PutItem"],
+            resources=[self.incident_table.table_arn],
+            conditions={"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["REVOKED_SESSION#*"]}},
+        ))
+        self.kms_key.grant_encrypt_decrypt(vm_role)
+        if self.edge:
+            self.origin_secret.grant_read(vm_role)
+        # Duyet nguoi dung tren SOC Console: chi tren dung user pool nay. Dang ky/dang nhap la API cong khai
+        # (khong can quyen IAM). Luu y: Console chay chung may voi app muc tieu -> may bi chiem co the tu duyet
+        # nguoi dung vao nhom viewer (xem Gioi han trong docs/SECURITY_REVIEW.md).
+        vm_role.add_to_policy(iam.PolicyStatement(
+            actions=["cognito-idp:ListUsers", "cognito-idp:ListUsersInGroup",
+                     "cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminRemoveUserFromGroup"],
+            resources=[self.user_pool.user_pool_arn],
+        ))
 
         webapp_asset = s3_assets.Asset(
             self, "WebAppAsset",
@@ -257,10 +445,15 @@ class LogSentinelStack(Stack):
             bucket_key=webapp_asset.s3_object_key,
             local_file="/tmp/webapp.zip",
         )
+        # Chi ARN cua bi mat nam trong UserData; gia tri do bootstrap.sh tu lay bang role cua may.
+        edge_env = f"EDGE_MODE=true ORIGIN_SECRET_ARN={self.origin_secret.secret_arn} " if self.edge else ""
         user_data.add_commands(
             "mkdir -p /opt/logsentinel/app",
             f"unzip -o {zip_path} -d /opt/logsentinel/app",
             f"INCIDENT_TABLE={self.incident_table.table_name} AWS_REGION={self.region} "
+            f"COGNITO_USER_POOL_ID={self.user_pool.user_pool_id} "
+            f"COGNITO_CLIENT_ID={self.user_pool_client.user_pool_client_id} "
+            f"{edge_env}"
             "bash /opt/logsentinel/app/deploy/bootstrap.sh",
         )
 
@@ -283,9 +476,105 @@ class LogSentinelStack(Stack):
             )],
         )
 
-        CfnOutput(self, "TargetVmAttackUrl", value=f"https://{self.target_vm.instance_public_ip}")
         CfnOutput(self, "TargetVmInstanceId", value=self.target_vm.instance_id,
                   description="Lay mat khau/TOTP: aws ssm start-session --target <id>, roi sudo cat /etc/logsentinel/webapp.env")
+
+    def _build_edge_distribution(self) -> None:
+        """
+        Dia chi cong khai cua he thong. Che do edge: CloudFront (chung chi that, dia chi khong doi khi thay may)
+        + WAF + dong bo IP bi khoa len WAF. Che do truc tiep: IP cong khai cua may, TLS tu ky.
+        """
+        if not self.edge:
+            base_url = f"https://{self.target_vm.instance_public_ip}"
+        else:
+            self.distribution = cloudfront.Distribution(
+                self, "EdgeDistribution",
+                comment="LogSentinel edge: CloudFront + WAF truoc may web",
+                default_behavior=cloudfront.BehaviorOptions(
+                    origin=origins.HttpOrigin(
+                        self.target_vm.instance_public_dns_name,
+                        protocol_policy=cloudfront.OriginProtocolPolicy.HTTP_ONLY,
+                        http_port=80,
+                        # Nginx tu choi moi request thieu header nay.
+                        custom_headers={"X-Origin-Verify": self.origin_secret.secret_value.unsafe_unwrap()},
+                    ),
+                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+                    allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
+                    # Console va API la noi dung dong theo tung nguoi dung: khong cache, chuyen het cookie/header.
+                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
+                    origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER,
+                ),
+                web_acl_id=self.edge.web_acl.attr_arn,
+                minimum_protocol_version=cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+                # IPv4 only: IP set cua WAF va moi luat theo IP trong he thong deu la IPv4.
+                enable_ipv6=False,
+                price_class=cloudfront.PriceClass.PRICE_CLASS_200,
+            )
+            base_url = f"https://{self.distribution.distribution_domain_name}"
+            self._build_waf_sync()
+
+        CfnOutput(self, "TargetVmAttackUrl", value=base_url)
+        CfnOutput(self, "SocConsoleUrl", value=f"{base_url}/console",
+                  description="Giao dien SOC Console cho khach hang (dang nhap mat khau + OTP)")
+
+    def _build_waf_sync(self) -> None:
+        """Moi phut: IP dang bi khoa trong DynamoDB -> IP set cua WAF (chan tai bien, truoc khi toi may)."""
+        ip_set = self.edge.blocked_ip_set
+        self.waf_sync_log_group = logs.LogGroup(
+            self, "WafSyncLogGroup",
+            log_group_name="/logsentinel/waf-sync",
+            retention=LogSentinelConfig.LOG_RETENTION_DAYS,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        self.waf_sync_lambda = _lambda.Function(
+            self, "WafSyncLambda",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="waf_sync.handler",
+            code=_lambda.Code.from_asset("lambda_src"),
+            timeout=Duration.seconds(30),
+            memory_size=256,
+            log_group=self.waf_sync_log_group,
+            environment={
+                "INCIDENT_TABLE": self.incident_table.table_name,
+                "WAF_IP_SET_NAME": ip_set.name,
+                "WAF_IP_SET_ID": ip_set.attr_id,
+            },
+        )
+        # Chi doc danh sach lenh khoa (GSI) va chi sua dung 1 IP set.
+        self.waf_sync_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["dynamodb:Query"],
+            resources=[f"{self.incident_table.table_arn}/index/by_type"],
+        ))
+        self.waf_sync_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["wafv2:GetIPSet", "wafv2:UpdateIPSet"],
+            resources=[ip_set.attr_arn],
+        ))
+        self.kms_key.grant_decrypt(self.waf_sync_lambda)
+        events.Rule(
+            self, "WafSyncSchedule",
+            schedule=events.Schedule.rate(Duration.minutes(1)),
+            targets=[events_targets.LambdaFunction(self.waf_sync_lambda)],
+        )
+
+    def _build_cost_guard(self) -> None:
+        """AWS Budgets: email khi chi tieu thang cua tai khoan sap vuot nguong (chong Denial of Wallet)."""
+        if not (self.cfg.monthly_budget_usd and self.cfg.alert_email):
+            if self.cfg.monthly_budget_usd:
+                Annotations.of(self).add_warning("Khong tao canh bao chi phi vi chua co alert_email.")
+            return
+        subscriber = [{"subscriptionType": "EMAIL", "address": self.cfg.alert_email}]
+
+        def notify(kind: str, threshold: int) -> dict:
+            return {"notification": {"notificationType": kind, "comparisonOperator": "GREATER_THAN",
+                                     "threshold": threshold, "thresholdType": "PERCENTAGE"},
+                    "subscribers": subscriber}
+
+        budgets.CfnBudget(
+            self, "MonthlyCostBudget",
+            budget={"budgetType": "COST", "timeUnit": "MONTHLY",
+                    "budgetLimit": {"amount": self.cfg.monthly_budget_usd, "unit": "USD"}},
+            notifications_with_subscribers=[notify("ACTUAL", 80), notify("FORECASTED", 100)],
+        )
 
     def _build_alarms(self) -> None:
         """3 CloudWatch Alarm gui ve SNS: loi detector, su kien web nghiem trong, CloudTrail bi tat."""
@@ -341,7 +630,19 @@ class LogSentinelStack(Stack):
             comparison_operator=breach, treat_missing_data=no_data,
         )
 
-        for alarm in (self.detector_error_alarm, self.critical_web_alarm, self.trail_tamper_alarm):
+        alarms = [self.detector_error_alarm, self.critical_web_alarm, self.trail_tamper_alarm]
+        if self.edge:
+            # 4. Dong bo WAF hong: IP bi khoa khong con duoc chan o bien (web app van tu chan).
+            # 3 lan lien tiep moi bao, de 1 lan loi mang le te khong lam phien.
+            self.waf_sync_error_alarm = cloudwatch.Alarm(
+                self, "WafSyncErrorsAlarm",
+                alarm_description="Lambda dong bo IP bi khoa len WAF bao loi lien tuc.",
+                metric=self.waf_sync_lambda.metric_errors(period=five_min),
+                threshold=3, evaluation_periods=1,
+                comparison_operator=breach, treat_missing_data=no_data,
+            )
+            alarms.append(self.waf_sync_error_alarm)
+        for alarm in alarms:
             alarm.add_alarm_action(action)
 
     def _build_monitoring_dashboard(self) -> None:
@@ -387,3 +688,6 @@ class LogSentinelStack(Stack):
         CfnOutput(self, "IncidentTableName", value=self.incident_table.table_name)
         CfnOutput(self, "AppLogGroupName", value=self.app_log_group.log_group_name)
         CfnOutput(self, "TelegramSecretArn", value=self.telegram_secret.secret_arn)
+        CfnOutput(self, "UserPoolId", value=self.user_pool.user_pool_id,
+                  description="Cognito: nang quyen quan tri vien dau tien bang `aws cognito-idp admin-add-user-to-group`")
+        CfnOutput(self, "UserPoolClientId", value=self.user_pool_client.user_pool_client_id)

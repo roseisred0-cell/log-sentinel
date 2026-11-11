@@ -1,0 +1,4 @@
+# Moi file van ban giu LF, ke ca khi checkout tren Windows. bootstrap.sh, nginx*.conf va webapp.service
+# duoc chep nguyen van len may Linux (S3 asset): CRLF se lam bash/nginx/systemd loi.
+* text=auto eol=lf
+*.bat text eol=crlf
