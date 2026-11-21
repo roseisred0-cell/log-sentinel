@@ -269,3 +269,17 @@ Khi có tên miền và ALB, chặng CloudFront → máy chuyển từ HTTP sang
 
 Hệ thống hiện chỉ giám sát ứng dụng mẫu của chính nó. Hướng đề xuất: agent đọc access log Nginx/Apache kèm chế độ
 "chỉ cảnh báo", dùng WAF sẵn có để chặn; sau đó mới tới thư viện cho từng framework.
+
+### 8.4 Vá ba điểm yếu nhóm G của bộ red-team
+
+Ba điểm yếu ở mục 7 có test `xfail(strict)` trong `tests/unit/test_redteam_scenarios.py` (G3, G4, G5). Khi vá xong
+một điểm, test tương ứng báo `XPASS`; lúc đó bỏ dấu `xfail` để nó thành test thường.
+
+| Test | Điểm yếu | Hướng sửa | Sửa được tới đâu |
+|---|---|---|---|
+| G3 | Botnet làm cạn hạn mức email Cognito (~50 thư/ngày) vì giới hạn đăng ký tính theo IP | Bước 1: thêm giới hạn **tổng** lượt đăng ký/quên mật khẩu mỗi ngày, đếm chung trong DynamoDB, chừa phần cho quên mật khẩu. Bước 2: gửi mail qua Amazon SES và thêm CAPTCHA (AWS WAF) | Dứt điểm sau bước 2. Bước 1 chỉ code, đủ để test G3 qua |
+| G4 | Người dùng chung NAT/Wi-Fi với kẻ tấn công bị khóa oan 24 giờ | Lỗi nhẹ (1 lần SQLi, dò quét): chỉ chặn request và khóa phiên/tài khoản, không khóa IP. Chỉ khóa IP khi tấn công lặp lại hoặc nghiêm trọng, thời gian ngắn hơn. Thêm nút gỡ khóa nhanh trên Console | Chỉ giảm nhẹ: hệ thống chỉ thấy IP thì không tách được hai người chung IP. Đổi lại, kẻ tấn công được thử thêm vài lần trước khi bị khóa. Cần chủ dự án chốt mức đánh đổi |
+| G5 | Máy web bị chiếm thì ghi được sự kiện giả vào `/logsentinel/sample-app`, khiến hệ thống khóa IP bất kỳ | Đối chiếu với nguồn log máy EC2 không ghi được: ở chế độ edge, chỉ khóa IP có xuất hiện thật trong log CloudFront/WAF. Thêm trần thiệt hại: sự kiện từ máy web chỉ khóa tối đa N IP/giờ, vượt ngưỡng thì dừng tự khóa và báo "nghi máy web bị chiếm" | Chỉ giảm nhẹ. Ký log bằng HMAC không giúp được vì kẻ chiếm máy lấy được luôn khóa ký |
+
+Thứ tự đề xuất: G3 bước 1 → trần thiệt hại của G5 → G4 (sau khi chốt mức đánh đổi) → SES, CAPTCHA và đối chiếu
+log CloudFront.

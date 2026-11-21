@@ -246,6 +246,8 @@ Ba điểm sau có test `xfail(strict)` trong nhóm G của bộ red-team; khi a
 
 Các giới hạn khác: tắt máy EC2 thì mất Console và web mẫu (Detector vẫn chạy); chế độ trực tiếp luôn bị trình duyệt cảnh báo chứng chỉ; chặng CloudFront → máy là HTTP trong mạng AWS (chế độ edge); bộ đếm "chặn tại chỗ" nằm riêng từng worker nên thực tế đoán được khoảng 9 lần trước khi bị chặn; Cognito dùng email mặc định (giới hạn khoảng 50 thư/ngày). Danh sách đầy đủ: mục 7 của [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
 
+Hướng sửa ba điểm trên được xếp vào hướng phát triển tương lai: mục 8.4 của [SECURITY_REVIEW.md](SECURITY_REVIEW.md).
+
 ## 13. Cấu trúc thư mục và tài liệu
 
 ```
@@ -298,6 +300,7 @@ docs/                            Tài liệu (bảng dưới)
 | Thêm `boto3` vào `requirements-dev.txt` | Để VS Code hết cảnh báo import |
 | Gom code lặp trong Detector, gom chuỗi `"logsentinel"` thành hằng | Tồn từ review, không ảnh hưởng chức năng |
 | Kiến trúc 2 AZ, tên miền `.net`, HTTPS đầu-cuối | Hướng mở rộng, xem mục 8 của `SECURITY_REVIEW.md` |
+| Vá ba điểm yếu G3, G4, G5 (cạn email, khóa oan NAT, giả sự kiện) | Hướng mở rộng, xem mục 8.4 của `SECURITY_REVIEW.md` |
 | Plugin cho web của khách, đa khách hàng | Chưa quyết (xem mục 11) |
 
 ## 15. Quyết định đã chốt và câu hỏi mở
