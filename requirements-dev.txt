@@ -1,3 +1,7 @@
 pytest==8.4.2
 flask>=3.0,<4
-# pyotp/qrcode/boto3 khong can cho test: test tu thay bang module gia
+# DynamoDB gia lap cho tests/unit/test_governance_store.py (ghi co dieu kien, GSI)
+moto[dynamodb]==5.1.22
+# boto3 cho VS Code nhan dien import (test khong goi AWS that; moto cung can boto3)
+boto3==1.44.0
+# pyotp/qrcode khong can cho test: test tu thay bang module gia

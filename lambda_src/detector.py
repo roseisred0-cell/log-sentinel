@@ -24,7 +24,7 @@ import os
 import time
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import boto3
@@ -169,9 +169,28 @@ _SEVERITY_ICON = {"CRITICAL": chr(0x1F534), "HIGH": chr(0x1F7E0)}   # cham do / 
 TELEGRAM_VALUE_CHARS = 300
 TELEGRAM_MAX_FIELDS = 8
 # Truong quen thuoc dua len dau voi nhan de doc; phan con lai liet ke theo ten truong.
-_TELEGRAM_LABELS = (("client_ip", "IP"), ("ip", "IP"), ("username", "Tai khoan"), ("user", "Tai khoan"),
-                    ("actor", "Nguoi thuc hien"), ("action", "Hanh dong"))
+_TELEGRAM_LABELS = (("client_ip", "IP"), ("ip", "IP"), ("username", "Tài khoản"), ("user", "Tài khoản"),
+                    ("actor", "Người thực hiện"), ("action", "Hành động"))
 _TELEGRAM_SKIP = {"timestamp", "source", "event_type", "severity"} | {k for k, _ in _TELEGRAM_LABELS}
+# Ten de doc cho cac truong ky thuat hay gap; truong la giu nguyen ten goc (de doi chieu voi SOC Console).
+_FIELD_NAMES = {
+    "status_code": "Mã HTTP", "attempt_count": "Số lần thử", "window_seconds": "Trong khoảng (giây)",
+    "payload": "Dữ liệu tấn công", "raw_payload": "Dữ liệu tấn công", "path": "Đường dẫn",
+    "user_agent": "Trình duyệt / công cụ", "reason": "Lý do", "target_user": "Tài khoản bị tác động",
+    "via_service": "Qua dịch vụ", "last_ip": "IP gần nhất", "last_username": "Tài khoản gần nhất",
+    "mfa_used": "Có dùng MFA", "error_code": "Mã lỗi", "outcome": "Kết quả", "key_id": "Khóa KMS",
+    "approvers": "Người duyệt", "request_id": "Mã yêu cầu", "bootstrap": "Chế độ khởi tạo",
+}
+VN_OFFSET = timedelta(hours=7)   # nguoi nhan canh bao o Viet Nam: hien gio dia phuong (UTC+7, khong doi gio mua he)
+
+
+def _vn_time(now_iso: str):
+    """'2026-11-11T08:30:00+00:00' -> '15:30:00 11/11/2026 (giờ VN)'; chuoi la -> None."""
+    try:
+        t = datetime.fromisoformat(now_iso).astimezone(timezone.utc) + VN_OFFSET
+    except (TypeError, ValueError):
+        return None
+    return t.strftime("%H:%M:%S %d/%m/%Y") + " (giờ VN)"
 
 
 def _tg(value, limit: int = TELEGRAM_VALUE_CHARS) -> str:
@@ -187,17 +206,14 @@ def _tg(value, limit: int = TELEGRAM_VALUE_CHARS) -> str:
 
 
 def _telegram_time(now_iso: str) -> str:
-    try:
-        return datetime.fromisoformat(now_iso).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    except (TypeError, ValueError):
-        return _tg(now_iso, 40)
+    return _vn_time(now_iso) or _tg(now_iso, 40)
 
 
 def _render_telegram(severity: str, rule: str, details: dict, inc_id: str, now_iso: str) -> str:
     """Tin nhan cho man hinh dien thoai: moi dong mot y, gia tri ky thuat nam trong <code> de cham la sao chep."""
     details = details if isinstance(details, dict) else {}
     lines = [f"{_SEVERITY_ICON.get(severity, chr(0x26A0))} <b>{_tg(severity, 20)}</b> | <b>{_tg(rule, 60)}</b>",
-             f"Thoi gian: {_telegram_time(now_iso)}"]
+             f"Thời gian: {_telegram_time(now_iso)}"]
     seen = set()
     for key, label in _TELEGRAM_LABELS:
         if details.get(key) not in (None, "") and label not in seen:
@@ -205,10 +221,10 @@ def _render_telegram(severity: str, rule: str, details: dict, inc_id: str, now_i
             lines.append(f"{label}: <code>{_tg(details[key])}</code>")
     extra = [k for k in details if k not in _TELEGRAM_SKIP and details[k] not in (None, "")]
     for key in extra[:TELEGRAM_MAX_FIELDS]:
-        lines.append(f"{_tg(str(key), 40)}: <code>{_tg(details[key])}</code>")
+        lines.append(f"{_tg(_FIELD_NAMES.get(key, str(key)), 40)}: <code>{_tg(details[key])}</code>")
     if len(extra) > TELEGRAM_MAX_FIELDS:
-        lines.append(f"(+{len(extra) - TELEGRAM_MAX_FIELDS} truong khac, xem SOC Console)")
-    lines.append(f"Ma su co: <code>{_tg(inc_id, 60)}</code>")
+        lines.append(f"(+{len(extra) - TELEGRAM_MAX_FIELDS} trường khác, xem SOC Console)")
+    lines.append(f"Mã sự cố: <code>{_tg(inc_id, 60)}</code>")
     return "\n".join(lines)
 
 
@@ -248,9 +264,9 @@ def _render_alert(severity: str, rule: str, details: dict, inc_id: str, now_iso:
     """Van ban thuong: noi dung email SNS, va ban du phong cho Telegram khi tin HTML qua dai (_render_telegram)."""
     return (
         f"[LogSentinel {severity}] {rule}\n"
-        f"Thoi gian: {now_iso}\n"
-        f"Chi tiet: {json.dumps(details, ensure_ascii=False, default=str)}\n"
-        f"Ma su co: {inc_id}"
+        f"Thời gian: {_vn_time(now_iso) or now_iso} · {now_iso}\n"
+        f"Chi tiết: {json.dumps(details, ensure_ascii=False, default=str)}\n"
+        f"Mã sự cố: {inc_id}"
     )
 
 
@@ -340,6 +356,15 @@ def count_failed_login(ip: str) -> int:
     return count_in_window(f"STATE#FAILED_LOGIN#{ip}", BRUTE_FORCE_WINDOW_S)
 
 
+def _count_or_skip(state_id: str, window_s: int, label: str):
+    """count_in_window nhung khong bao gio lam hong Lambda: DynamoDB loi -> ghi log, tra None (bo qua luat nay)."""
+    try:
+        return count_in_window(state_id, window_s)
+    except Exception as exc:
+        print(f"[ERROR] {label} state tracking failed: {type(exc).__name__}")
+        return None
+
+
 def count_in_window(state_id: str, window_s: int) -> int:
     """
     Bo dem su kien theo cua so thoi gian, nguyen tu tuyet doi (nhieu Lambda chay song song van dung).
@@ -388,6 +413,12 @@ def count_in_window(state_id: str, window_s: int) -> int:
 
 
 # ============================================================ Rules: web app
+# Su kien muc Phan quyen (sample_app/admin_governance.py): nang/ha Quan tri, vo hieu hoa tai khoan, PIN bi khoa,
+# PIN bi dat lai, yeu cau moi cho duyet (bao cac admin khac vao bo phieu), Cognito loi khi thuc thi.
+GOVERNANCE_EVENTS = frozenset(("ADMIN_ROLE_CHANGED", "USER_DISABLED", "ADMIN_PIN_LOCKED", "ADMIN_PIN_RESET",
+                               "ROLE_REQUEST_CREATED", "ROLE_CHANGE_FAILED"))
+
+
 def evaluate_webapp_log(raw_message: str) -> None:
     data = _parse_json(raw_message)
     if data is None:
@@ -404,16 +435,16 @@ def evaluate_webapp_log(raw_message: str) -> None:
         record_incident("SQL_INJECTION", "CRITICAL", data, raw_message)
         auto_block_attacker_ip(client_ip, "Phat hien payload SQL Injection / Path Traversal")
 
+    elif event_type in GOVERNANCE_EVENTS:
+        # Thao tac trong muc Phan quyen cua SOC Console: canh bao cho moi admin. KHONG khoa IP (IP cua admin).
+        record_incident(event_type, "HIGH", data, raw_message)
+
     elif event_type == "NOT_FOUND":
         # Do quet: 1 IP goi nhieu duong dan khong ton tai (/.env, /wp-admin, /phpmyadmin...) trong thoi gian ngan.
         if not table:
             return
         ip = _blockable_ip(client_ip) or str(client_ip)[:64]
-        try:
-            count = count_in_window(f"STATE#NOT_FOUND#{ip}", SCAN_WINDOW_S)
-        except Exception as exc:
-            print(f"[ERROR] Scan state tracking failed: {type(exc).__name__}")
-            return
+        count = _count_or_skip(f"STATE#NOT_FOUND#{ip}", SCAN_WINDOW_S, "Scan")
         if count == SCAN_THRESHOLD:
             record_incident("SCAN_DETECTED", "HIGH",
                             {**data, "attempt_count": count, "window_seconds": SCAN_WINDOW_S}, raw_message)
@@ -423,10 +454,8 @@ def evaluate_webapp_log(raw_message: str) -> None:
         ip = _blockable_ip(client_ip) or str(client_ip)[:64]
         if not table:
             return
-        try:
-            count = count_failed_login(ip)
-        except Exception as exc:
-            print(f"[ERROR] State tracking failed: {type(exc).__name__}")
+        count = _count_or_skip(f"STATE#FAILED_LOGIN#{ip}", BRUTE_FORCE_WINDOW_S, "Brute-force")
+        if count is None:
             return
         # Bang dung 1 lan / cua so -> 1 canh bao, khong bao cao canh bao (alert fatigue).
         if count == BRUTE_FORCE_THRESHOLD:
@@ -448,11 +477,7 @@ def _track_login_failure_spike(data: dict, raw_message: str) -> None:
     "credential stuffing" - moi IP va moi tai khoan chi thu 1 lan nen ca hai bo dem kia deu khong thay.
     Chi canh bao: khong co IP don le nao dang trach.
     """
-    try:
-        count = count_in_window("STATE#FAILED_LOGIN_GLOBAL", LOGIN_SPIKE_WINDOW_S)
-    except Exception as exc:
-        print(f"[ERROR] Spike state tracking failed: {type(exc).__name__}")
-        return
+    count = _count_or_skip("STATE#FAILED_LOGIN_GLOBAL", LOGIN_SPIKE_WINDOW_S, "Spike")
     if count == LOGIN_SPIKE_THRESHOLD + 1:   # "vuot 50" = lan thu 51; bang dung 1 lan / cua so -> 1 canh bao
         record_incident("LOGIN_FAILURE_SPIKE", "HIGH", {
             "attempt_count": count, "window_seconds": LOGIN_SPIKE_WINDOW_S,
@@ -462,11 +487,7 @@ def _track_login_failure_spike(data: dict, raw_message: str) -> None:
 
 def _track_slow_brute_force(data: dict, ip: str, client_ip, raw_message: str) -> None:
     """Brute-force CHAM: 1 lan doan moi phut khong bao gio cham nguong 5 lan/60s -> dem them cua so 1 gio."""
-    try:
-        count = count_in_window(f"STATE#FAILED_LOGIN_SLOW#{ip}", SLOW_BRUTE_FORCE_WINDOW_S)
-    except Exception as exc:
-        print(f"[ERROR] Slow state tracking failed: {type(exc).__name__}")
-        return
+    count = _count_or_skip(f"STATE#FAILED_LOGIN_SLOW#{ip}", SLOW_BRUTE_FORCE_WINDOW_S, "Slow")
     if count == SLOW_BRUTE_FORCE_THRESHOLD:
         record_incident("SLOW_BRUTE_FORCE", "HIGH",
                         {**data, "attempt_count": count, "window_seconds": SLOW_BRUTE_FORCE_WINDOW_S}, raw_message)
@@ -481,11 +502,7 @@ def _track_account_under_attack(data: dict, raw_message: str) -> None:
     username = str(data.get("username") or "").strip().lower()[:64]
     if not username or username == "unknown":
         return
-    try:
-        count = count_in_window(f"STATE#FAILED_LOGIN_USER#{username}", ACCOUNT_ATTACK_WINDOW_S)
-    except Exception as exc:
-        print(f"[ERROR] Account state tracking failed: {type(exc).__name__}")
-        return
+    count = _count_or_skip(f"STATE#FAILED_LOGIN_USER#{username}", ACCOUNT_ATTACK_WINDOW_S, "Account")
     if count == ACCOUNT_ATTACK_THRESHOLD:
         record_incident("ACCOUNT_UNDER_ATTACK", "HIGH", {
             "username": username, "attempt_count": count, "window_seconds": ACCOUNT_ATTACK_WINDOW_S,
@@ -558,11 +575,7 @@ def _track_console_brute_force(who, ip, raw_message: str) -> None:
     """Chi canh bao, khong khoa: muc tieu la AWS Console, khoa IP o web app cua ta khong ngan duoc gi."""
     if not table:
         return
-    try:
-        count = count_in_window(f"STATE#CONSOLE_LOGIN_FAILED#{str(ip)[:64]}", CONSOLE_FAIL_WINDOW_S)
-    except Exception as exc:
-        print(f"[ERROR] Console state tracking failed: {type(exc).__name__}")
-        return
+    count = _count_or_skip(f"STATE#CONSOLE_LOGIN_FAILED#{str(ip)[:64]}", CONSOLE_FAIL_WINDOW_S, "Console")
     if count == CONSOLE_FAIL_THRESHOLD:
         record_incident("CONSOLE_BRUTE_FORCE", "HIGH", {
             "user": who, "ip": ip, "attempt_count": count, "window_seconds": CONSOLE_FAIL_WINDOW_S,

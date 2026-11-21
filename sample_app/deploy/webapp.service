@@ -19,15 +19,32 @@ ExecStart=/opt/logsentinel/venv/bin/gunicorn --worker-class gthread --workers 2 
 Restart=always
 RestartSec=5s
 
-# Sandbox systemd
+# Sandbox systemd (tests/unit/test_ec2_hardening.py). Loi trong app kho leo thang thanh chiem ca may.
+# Kiem tra tren may: systemd-analyze security webapp   (diem cang thap cang tot)
 NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
 RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+# Chan vung nho vua ghi vua chay (nap shellcode). Python/Flask/boto3 khong can JIT.
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# Chi mang IP va socket noi bo (khong raw socket / netlink de do quet mang tu may).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 ReadWritePaths=/var/log/webapp
 
 [Install]

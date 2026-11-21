@@ -7,6 +7,7 @@ Giao dien nho, che giau boto3 va ma loi cua Cognito:
     login / complete_mfa / reauthenticate          - dang nhap (co the yeu cau ma TOTP), xac minh lai truoc thao tac nhay cam
     mfa_enabled / begin_mfa_setup / confirm_mfa_setup / set_mfa_disabled   - bat/tat 2FA cua chinh nguoi dung
     list_users / approve / revoke                  - quan tri duyet nguoi dung (nhom Cognito)
+    promote / demote / disable                     - phan quyen, chi goi sau khi du phieu (admin_governance.py)
 
 Vai tro suy ra tu nhom Cognito:  soc-admins -> "admin",  soc-viewers -> "viewer",  khong nhom -> "pending".
 Ngoai le cua module nay khong mang thong tin nhay cam; tang tren chi can biet LOAI loi.
@@ -238,6 +239,15 @@ class CognitoIdentity:
                            role=role_from_groups(claims.get("cognito:groups")),
                            access_token=auth["AccessToken"])
 
+    def whoami(self, access_token: str) -> str:
+        """Email cua chu token, do CHINH Cognito xac nhan (Lambda thuc thi phan quyen khong tin danh tinh do
+        EC2 gui). Token sai / het han / da thu hoi -> AuthFailed."""
+        res = self._call(self._public_client().get_user, AccessToken=access_token)
+        email = next((a["Value"] for a in res.get("UserAttributes") or [] if a.get("Name") == "email"), "")
+        if not email:
+            raise AuthFailed("NoEmail")
+        return email.strip().lower()
+
     # --------------------------------------------------------------- 2FA
     def mfa_enabled(self, access_token: str) -> bool:
         res = self._call(self._public_client().get_user, AccessToken=access_token)
@@ -309,10 +319,40 @@ class CognitoIdentity:
         return match["email"]
 
     def revoke(self, username: str) -> Optional[str]:
-        """Chi thu hoi nguoi xem. Nhom admin chi doi duoc bang AWS CLI/Console, khong qua web app."""
+        """Chi thu hoi nguoi xem. Nhom admin chi doi qua promote/demote (sau khi du phieu, admin_governance.py)."""
         match = next((u for u in self.list_users()["viewers"] if u["username"] == username), None)
         if not match:
             return None
         self._call(self._admin_client().admin_remove_user_from_group,
                    UserPoolId=self.user_pool_id, Username=username, GroupName=VIEWER_GROUP)
+        return match["email"]
+
+    # ------------------------------------------- phan quyen (chi goi sau khi du phieu)
+    def _move(self, username: str, bucket: str, to_group: str, from_group: str) -> Optional[str]:
+        """Them vao nhom moi TRUOC roi moi bo nhom cu: loi giua chung van de lai mot vai tro hop le."""
+        match = next((u for u in self.list_users()[bucket] if u["username"] == username), None)
+        if not match:
+            return None
+        self._call(self._admin_client().admin_add_user_to_group,
+                   UserPoolId=self.user_pool_id, Username=username, GroupName=to_group)
+        self._call(self._admin_client().admin_remove_user_from_group,
+                   UserPoolId=self.user_pool_id, Username=username, GroupName=from_group)
+        return match["email"]
+
+    def promote(self, username: str) -> Optional[str]:
+        """Nguoi xem -> Quan tri. Nguoi khac (cho duyet, da la admin, khong ton tai) -> None."""
+        return self._move(username, "viewers", ADMIN_GROUP, VIEWER_GROUP)
+
+    def demote(self, username: str) -> Optional[str]:
+        """Quan tri -> Nguoi xem."""
+        return self._move(username, "admins", VIEWER_GROUP, ADMIN_GROUP)
+
+    def disable(self, username: str) -> Optional[str]:
+        """Khoa dang nhap va thu hoi moi token dang dung (phien Console het han toi da sau 30 phut)."""
+        users = self.list_users()
+        match = next((u for b in ("pending", "viewers", "admins") for u in users[b] if u["username"] == username), None)
+        if not match:
+            return None
+        self._call(self._admin_client().admin_disable_user, UserPoolId=self.user_pool_id, Username=username)
+        self._call(self._admin_client().admin_user_global_sign_out, UserPoolId=self.user_pool_id, Username=username)
         return match["email"]

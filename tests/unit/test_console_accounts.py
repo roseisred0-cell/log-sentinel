@@ -93,10 +93,42 @@ class FakeIdentity:
     def set_mfa_disabled(self, token):
         self._by_token(token)[1]["mfa"] = False
 
+    def whoami(self, token):
+        email = token.removeprefix("tok-") if isinstance(token, str) else ""
+        u = self.users.get(email)
+        if not u or not u["confirmed"] or u.get("disabled"):
+            raise self.cog.AuthFailed("NotAuthorizedException")
+        return email
+
+    def _find(self, username, role=None):
+        for email, u in self.users.items():
+            if u["username"] == username and u["confirmed"] and not u.get("disabled") \
+                    and (role is None or u["role"] == role):
+                return email, u
+        return None, None
+
+    def promote(self, username):
+        email, u = self._find(username, "viewer")
+        if u:
+            u["role"] = "admin"
+        return email
+
+    def demote(self, username):
+        email, u = self._find(username, "admin")
+        if u:
+            u["role"] = "viewer"
+        return email
+
+    def disable(self, username):
+        email, u = self._find(username)
+        if u:
+            u["disabled"] = True
+        return email
+
     def list_users(self):
         out = {"pending": [], "viewers": [], "admins": []}
         for email, u in self.users.items():
-            if u["confirmed"]:
+            if u["confirmed"] and not u.get("disabled"):
                 bucket = {"pending": "pending", "viewer": "viewers", "admin": "admins"}[u["role"]]
                 out[bucket].append({"username": u["username"], "email": email, "created": None})
         return out
@@ -137,11 +169,14 @@ def acct(mod, env):
             self.unblocked.append(ip)
 
     store = Store()
+    import admin_governance
     bl = mod.BlockList(lambda ip: None, clock=clock, negative_ttl=5)
-    app = mod.create_app(mod.load_config_from_env(env), bl, store, identity=identity, clock=clock)
+    gov_store = admin_governance.MemoryGovernanceStore()
+    app = mod.create_app(mod.load_config_from_env(env), bl, store, identity=identity, clock=clock,
+                         governance_store=gov_store)
     log_path = Path(env["APP_LOG_PATH"])
     return types.SimpleNamespace(
-        client=app.test_client(), identity=identity, clock=clock, store=store, bl=bl,
+        app=app, client=app.test_client(), identity=identity, clock=clock, store=store, bl=bl, gov_store=gov_store,
         logs=lambda: [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()])
 
 
@@ -171,9 +206,16 @@ def local_admin(a, ip=IP):
     return get(a, "/api/session", ip=ip).get_json()["csrf"]
 
 
+def local_admin_unlocked(a, ip=IP):
+    """Admin noi bo da mo muc Phan quyen (duyet nguoi dung can PIN rieng, xem test_admin_governance)."""
+    csrf = local_admin(a, ip)
+    assert post(a, "/api/governance/pin", {"pin": "482915"}, csrf=csrf, ip=ip).status_code == 200
+    return csrf
+
+
 # ----------------------------------------------------------- cau hinh
 def test_config_reports_cognito_and_min_level(acct):
-    assert get(acct, "/api/config").get_json() == {"cognito": True, "min_password_level": 2}
+    assert get(acct, "/api/config").get_json() == {"cognito": True, "chat": False, "min_password_level": 2}
 
 
 def test_without_cognito_registration_endpoints_do_not_exist(mod, env):
@@ -510,15 +552,17 @@ def test_viewer_sees_data_but_cannot_unblock_or_manage_users(acct):
 
 
 def test_cognito_admin_can_unblock_and_list_users(acct):
-    acct.identity.add("boss@x.co", role="admin")
-    csrf = sign_in(acct, "boss@x.co")
+    acct.identity.add("boss@x.co", role="admin", mfa=True)  # admin bat buoc 2FA (test_admin_governance)
+    post(acct, "/auth/login", {"email": "boss@x.co", "password": STRONG})
+    post(acct, "/auth/mfa", {"code": GOOD_TOTP})
+    csrf = get(acct, "/api/session").get_json()["csrf"]
     assert post(acct, "/api/unblock", {"ip": "203.0.113.5"}, csrf=csrf).status_code == 200
     assert get(acct, "/api/users").status_code == 200
 
 
 def test_admin_approves_pending_user_and_it_is_audited(acct):
     acct.identity.add("p@x.co")
-    csrf = local_admin(acct)
+    csrf = local_admin_unlocked(acct)
     assert [u["email"] for u in get(acct, "/api/users").get_json()["pending"]] == ["p@x.co"]
     assert post(acct, "/api/users/approve", {"username": "uid-p"}, csrf=csrf).status_code == 200
     audit = acct.logs()[-1]
@@ -531,7 +575,7 @@ def test_admin_approves_pending_user_and_it_is_audited(acct):
 
 def test_approve_requires_csrf_and_unknown_user_is_404(acct):
     acct.identity.add("p@x.co")
-    csrf = local_admin(acct)
+    csrf = local_admin_unlocked(acct)
     assert post(acct, "/api/users/approve", {"username": "uid-p"}).status_code == 403
     assert post(acct, "/api/users/approve", {"username": "uid-ghost"}, csrf=csrf).status_code == 404
     assert post(acct, "/api/users/approve", {}, csrf=csrf).status_code == 404
@@ -540,7 +584,7 @@ def test_approve_requires_csrf_and_unknown_user_is_404(acct):
 
 def test_revoke_returns_user_to_pending(acct):
     acct.identity.add("v@x.co", role="viewer")
-    csrf = local_admin(acct)
+    csrf = local_admin_unlocked(acct)
     assert post(acct, "/api/users/revoke", {"username": "uid-v"}, csrf=csrf).status_code == 200
     assert acct.logs()[-1]["event_type"] == "USER_REVOKED"
     assert acct.identity.users["v@x.co"]["role"] == "pending"
@@ -555,7 +599,7 @@ def test_internal_admin_keeps_full_access(acct):
 
 # -------------------------------------------------------- ma nguon giao dien
 def test_new_scripts_never_use_innerhtml_or_eval():
-    for name in ("console.js", "password-strength.js"):
+    for name in ("console.js", "password-strength.js", "incident-text.js"):
         js = (Path(APP_SRC) / "static" / name).read_text(encoding="utf-8")
         code = "\n".join(l for l in js.splitlines() if not l.strip().startswith("//"))
         assert "innerHTML" not in code and "document.write" not in code and "eval(" not in code, name
@@ -564,4 +608,6 @@ def test_new_scripts_never_use_innerhtml_or_eval():
 def test_console_page_loads_scripts_from_own_origin(acct):
     html = get(acct, "/console").get_data(as_text=True)
     assert "/static/password-strength.js" in html and "/static/console.js" in html
+    # cau tieng Viet cho bang su co: phai nap TRUOC console.js (console.js goi IncidentText.describe)
+    assert -1 < html.find("/static/incident-text.js") < html.find("/static/console.js")
     assert "http://" not in html and "https://" not in html  # khong nap tai nguyen ben ngoai (CSP default-src 'self')

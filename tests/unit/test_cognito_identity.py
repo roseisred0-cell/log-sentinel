@@ -222,6 +222,66 @@ def test_revoke_only_affects_viewers_never_admins(idp, directory):
     assert all(name != "admin_remove_user_from_group" for name, _ in directory.calls)
 
 
+# ------------------------------- xac dinh nguoi goi bang token (Lambda thuc thi phan quyen)
+def test_whoami_reads_email_from_cognito_using_the_callers_own_token(idp, pub):
+    pub.results["get_user"] = {"Username": "uid-a", "UserAttributes": [{"Name": "email", "Value": "A@X.co"}]}
+    assert idp.whoami("tok-abc") == "a@x.co"
+    assert pub.calls[-1] == ("get_user", {"AccessToken": "tok-abc"})
+
+
+@pytest.mark.parametrize("code", ["NotAuthorizedException", "UserNotFoundException"])
+def test_whoami_rejects_invalid_or_revoked_tokens(idp, pub, code):
+    pub.errors["get_user"] = code
+    with pytest.raises(ci.AuthFailed):
+        idp.whoami("forged")
+
+
+def test_whoami_without_email_attribute_is_auth_failure(idp, pub):
+    pub.results["get_user"] = {"Username": "uid-a", "UserAttributes": []}
+    with pytest.raises(ci.AuthFailed):
+        idp.whoami("tok")
+
+
+# ------------------------------------- phan quyen (sau khi du phieu, admin_governance)
+def _writes(directory):
+    return [(n, kw.get("GroupName"), kw["Username"]) for n, kw in directory.calls
+            if n.startswith("admin_") and n != "admin_get_user"]
+
+
+def test_promote_moves_viewer_into_admin_group_adding_before_removing(idp, directory):
+    assert idp.promote("u-view") == "view@x.co"
+    # them vao soc-admins TRUOC: neu lenh thu hai loi, nguoi do van co mot vai tro hop le (admin), khong bi treo
+    assert _writes(directory) == [("admin_add_user_to_group", "soc-admins", "u-view"),
+                                  ("admin_remove_user_from_group", "soc-viewers", "u-view")]
+
+
+@pytest.mark.parametrize("username", ["u-admin", "u-new", "u-unconf", "u-ghost", ""])
+def test_promote_refuses_anyone_not_a_viewer(idp, directory, username):
+    assert idp.promote(username) is None and _writes(directory) == []
+
+
+def test_demote_moves_admin_back_to_viewers(idp, directory):
+    assert idp.demote("u-admin") == "boss@x.co"
+    assert _writes(directory) == [("admin_add_user_to_group", "soc-viewers", "u-admin"),
+                                  ("admin_remove_user_from_group", "soc-admins", "u-admin")]
+
+
+@pytest.mark.parametrize("username", ["u-view", "u-new", "u-ghost"])
+def test_demote_refuses_anyone_not_an_admin(idp, directory, username):
+    assert idp.demote(username) is None and _writes(directory) == []
+
+
+def test_disable_blocks_login_and_signs_out_everywhere(idp, directory):
+    assert idp.disable("u-view") == "view@x.co"
+    assert _writes(directory) == [("admin_disable_user", None, "u-view"), ("admin_user_global_sign_out", None, "u-view")]
+    assert all(kw["UserPoolId"] == "pool-1" for n, kw in directory.calls if n.startswith("admin_"))
+
+
+@pytest.mark.parametrize("username", ["u-ghost", "u-off", ""])
+def test_disable_refuses_unknown_or_already_disabled_users(idp, directory, username):
+    assert idp.disable(username) is None and _writes(directory) == []
+
+
 def test_totp_uri_encodes_account_name():
     uri = ci.totp_uri("a+b@x.co", "SECRET")
     assert uri.startswith("otpauth://totp/LogSentinel:a%2Bb%40x.co?secret=SECRET")

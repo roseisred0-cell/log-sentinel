@@ -157,7 +157,7 @@ def test_float_and_huge_fields_are_dynamodb_safe(det):
     details = det.table.put_item.call_args_list[0].kwargs["Item"]["details"]
     assert details["latency"] == Decimal("0.25")
     assert len(details["payload"]) == det.MAX_FIELD_CHARS
-    json.loads(det.sns.publish.call_args.kwargs["Message"].split("Chi tiet: ")[1].split("\nMa su co")[0])
+    json.loads(det.sns.publish.call_args.kwargs["Message"].split("Chi tiết: ")[1].split("\nMã sự cố")[0])
 
 
 @pytest.mark.parametrize("raw", ["", "null", "[]", "123", '"str"', "{bad", '{"userIdentity": null, "eventName": "ConsoleLogin"}'])

@@ -71,10 +71,28 @@ def test_detector_cannot_delete_incidents(template):
     assert not any(a in actions for a in ("dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:BatchWriteItem"))
 
 
-def test_vm_can_only_delete_block_items(template):
-    deletes = [st for st in _statements(template, "TargetVmRole") if "dynamodb:DeleteItem" in _actions(st)]
-    assert len(deletes) == 1
-    assert deletes[0]["Condition"] == {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["BLOCKED_IP#*"]}}
+def _vm_write_prefixes(template, action):
+    """Tien to khoa ma EC2 duoc `action`. Moi lenh ghi deu PHAI co dieu kien LeadingKeys (khong ghi tu do)."""
+    prefixes = set()
+    for st in _statements(template, "TargetVmRole"):
+        if action in _actions(st):
+            cond = st.get("Condition", {}).get("ForAllValues:StringLike", {}).get("dynamodb:LeadingKeys")
+            assert cond, f"{action} khong co dieu kien LeadingKeys: {st}"
+            prefixes.update(cond)
+    return prefixes
+
+
+def test_vm_can_only_delete_block_and_pin_items(template):
+    # go khoa IP, dat lai PIN admin. Ban ghi su co (bang chung) va yeu cau phan quyen (dau vet) khong xoa duoc.
+    assert _vm_write_prefixes(template, "dynamodb:DeleteItem") == {"BLOCKED_IP#*", "ADMIN_PIN#*"}
+
+
+def test_vm_writes_are_limited_to_session_and_pin_keys(template):
+    # ROLE_REQ# (yeu cau + phieu bau) chi Lambda thuc thi phan quyen ghi duoc: may bi chiem khong gia phieu.
+    assert _vm_write_prefixes(template, "dynamodb:PutItem") == {"REVOKED_SESSION#*", "ADMIN_PIN#*"}
+    assert _vm_write_prefixes(template, "dynamodb:UpdateItem") == {"ADMIN_PIN#*"}
+    vm_actions = {a for st in _statements(template, "TargetVmRole") for a in _actions(st)}
+    assert not vm_actions & {"dynamodb:BatchWriteItem", "dynamodb:*", "dynamodb:PartiQLUpdate", "dynamodb:Scan"}
 
 
 def test_console_index_exists(template):
@@ -82,16 +100,8 @@ def test_console_index_exists(template):
         "GlobalSecondaryIndexes": [assertions.Match.object_like({"IndexName": "by_type"})]})
 
 
-def test_app_logs_archived_to_s3_via_firehose():
-    template = _template(enable_app_log_archive="true")
-    template.resource_count_is("AWS::KinesisFirehose::DeliveryStream", 1)
-    template.has_resource_properties("AWS::KinesisFirehose::DeliveryStream", {
-        "ExtendedS3DestinationConfiguration": assertions.Match.object_like({"Prefix": "app-logs/!{timestamp:yyyy/MM/dd}/"})})
-    # 1 filter -> Lambda (app), 1 -> Lambda (cloudtrail), 1 -> Firehose. Gioi han AWS: 2 filter / log group.
-    template.resource_count_is("AWS::Logs::SubscriptionFilter", 3)
-
-
-def test_firehose_archive_is_opt_in(template):
+def test_no_firehose_delivery_stream(template):
+    """Da go Firehose (12/11): khong co duong nao chep log web app ra ngoai CloudWatch."""
     template.resource_count_is("AWS::KinesisFirehose::DeliveryStream", 0)
     template.resource_count_is("AWS::Logs::SubscriptionFilter", 2)
 
@@ -150,10 +160,61 @@ def test_roles_are_cognito_groups(template):
 def test_vm_cognito_permissions_are_scoped_to_the_pool_and_exclude_destructive_calls(template):
     stmts = [st for st in _statements(template, "TargetVmRole") if any(a.startswith("cognito-idp:") for a in _actions(st))]
     assert len(stmts) == 1
+    # EC2 chi doc danh ba. Moi thay doi nhom / vo hieu hoa di qua Lambda thuc thi phan quyen (nhat ky 12/11, D1).
+    assert sorted(_actions(stmts[0])) == sorted(["cognito-idp:ListUsers", "cognito-idp:ListUsersInGroup"])
+    assert stmts[0]["Resource"] != "*" and "ConsoleUserPool" in str(stmts[0]["Resource"])
+
+
+# ---------------------------------------- Lambda thuc thi phan quyen (D1)
+def _governance_fn(template):
+    fns = template.find_resources("AWS::Lambda::Function")
+    return next(v for k, v in fns.items() if k.startswith("GovernanceExecutor"))
+
+
+def test_governance_lambda_runs_the_shared_governance_module(template):
+    props = _governance_fn(template)["Properties"]
+    assert props["Handler"] == "governance_lambda.handler" and props["Runtime"] == "python3.12"
+    env = props["Environment"]["Variables"]
+    assert {"INCIDENT_TABLE", "COGNITO_USER_POOL_ID", "COGNITO_CLIENT_ID", "LOCAL_PRINCIPAL"} <= set(env)
+    assert env["LOCAL_PRINCIPAL"] == "local:admin"
+
+
+def test_only_the_governance_lambda_may_change_cognito_groups(template):
+    stmts = [st for st in _statements(template, "GovernanceExecutor") if any(a.startswith("cognito-idp:") for a in _actions(st))]
+    assert len(stmts) == 1
     assert sorted(_actions(stmts[0])) == sorted([
         "cognito-idp:ListUsers", "cognito-idp:ListUsersInGroup",
-        "cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminRemoveUserFromGroup"])
-    assert stmts[0]["Resource"] != "*" and "ConsoleUserPool" in str(stmts[0]["Resource"])
+        "cognito-idp:AdminAddUserToGroup", "cognito-idp:AdminRemoveUserFromGroup",
+        "cognito-idp:AdminDisableUser", "cognito-idp:AdminUserGlobalSignOut"])
+    assert "ConsoleUserPool" in str(stmts[0]["Resource"])
+    # Khong bao gio: xoa / tao user, dat mat khau, sua thuoc tinh, tat MFA cua nguoi khac.
+    everything = str(template.find_resources("AWS::IAM::Policy"))
+    for forbidden in ("AdminDeleteUser", "AdminCreateUser", "AdminSetUserPassword", "AdminSetUserMFAPreference",
+                      "AdminUpdateUserAttributes"):
+        assert forbidden not in everything
+
+
+def test_governance_lambda_writes_only_role_request_keys(template):
+    writes = [st for st in _statements(template, "GovernanceExecutor")
+              if any(a in _actions(st) for a in ("dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"))]
+    assert writes and all(st["Condition"] == {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["ROLE_REQ#*"]}}
+                          for st in writes)
+    assert not any("dynamodb:DeleteItem" in _actions(st) for st in writes)
+
+
+def test_vm_may_invoke_only_the_governance_lambda(template):
+    invokes = [st for st in _statements(template, "TargetVmRole") if "lambda:InvokeFunction" in _actions(st)]
+    assert len(invokes) == 1 and "GovernanceExecutor" in str(invokes[0]["Resource"])
+
+
+def test_nothing_may_call_bedrock(template):
+    """Da go tro ly AI (12/11): khong role nao co quyen goi model tren Bedrock."""
+    policies = str(template.find_resources("AWS::IAM::Policy"))
+    assert "bedrock" not in policies.lower()
+
+
+def test_web_app_learns_the_governance_function_name_via_user_data(template):
+    assert "GOVERNANCE_FUNCTION=" in str(template.find_resources("AWS::EC2::Instance"))
 
 
 def test_web_app_receives_cognito_ids_via_user_data(template):

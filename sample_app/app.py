@@ -12,8 +12,12 @@ Deep modules (giao dien nho, chi tiet an ben trong):
 Giao dien khach hang: https://<host>/console  (phien 30 phut). Hai cach dang nhap:
     - Tai khoan "admin" noi bo: mat khau + OTP trong webapp.env (du phong, 2FA bat buoc)
     - Tai khoan Cognito: tu dang ky, xac nhan email, cho admin duyet; tu bat/tat 2FA TOTP trong giao dien
-    Vai tro: admin (go khoa IP, duyet nguoi dung) | viewer (chi xem) | pending (chua duoc duyet)
-    Module: cognito_identity.py (Cognito), password_strength.py (muc do manh mat khau)
+    Vai tro: admin (go khoa IP, muc Phan quyen; bat buoc 2FA) | viewer (chi xem) | pending (chua duoc duyet)
+    Module: cognito_identity.py (Cognito), password_strength.py (muc do manh mat khau),
+            admin_governance.py (muc Phan quyen: PIN rieng, bo phieu nang/ha/vo hieu hoa, che do khoi tao),
+            governance_lambda.py (Lambda thuc thi phan quyen + LambdaExecutor de EC2 goi Lambda),
+            caller_auth.py (Lambda xac minh nguoi goi bang token Cognito),
+            chat_assistant.py (tro ly AI: huong dan + phan tich su co, goi OpenAI tu may chu)
 
 Gunicorn: gunicorn -w 4 -b 127.0.0.1:8080 'app:create_app()'
 """
@@ -40,7 +44,11 @@ import pyotp
 from flask import Flask, g, jsonify, render_template, render_template_string, request, session
 from markupsafe import Markup
 
+import admin_governance as governance_mod
+import chat_assistant
 import cognito_identity as cognito
+import governance_lambda
+import incident_stats
 import password_strength
 
 
@@ -59,6 +67,12 @@ class AppConfig:
     # Rong = tat dang ky/dang nhap Cognito (console chi con tai khoan admin noi bo).
     cognito_user_pool_id: str = ""
     cognito_client_id: str = ""
+    # Lambda thuc thi phan quyen (EC2 khong co quyen ghi Cognito). Rong = chay ngay trong app (test / may dev).
+    governance_function: str = ""
+    # Tro ly AI (OpenAI). Rong = tat. Key nam trong Secrets Manager, khong bao gio xuong trinh duyet.
+    chat_model: str = ""
+    chat_secret_id: str = ""
+    chat_daily_limit: int = 30
 
 
 _REQUIRED_ENV = ("APP_ADMIN_PASSWORD", "APP_TOTP_SECRET", "APP_SETUP_TOKEN", "APP_SESSION_SECRET",
@@ -91,6 +105,10 @@ def load_config_from_env(env: Mapping[str, str] = os.environ) -> AppConfig:
         log_path=env.get("APP_LOG_PATH", "/var/log/webapp/access.log"),
         cognito_user_pool_id=env.get("COGNITO_USER_POOL_ID", "").strip(),
         cognito_client_id=env.get("COGNITO_CLIENT_ID", "").strip(),
+        governance_function=env.get("GOVERNANCE_FUNCTION", "").strip(),
+        chat_model=env.get("CHAT_MODEL", "").strip(),
+        chat_secret_id=env.get("CHAT_SECRET_ID", "").strip(),
+        chat_daily_limit=int(env.get("CHAT_DAILY_LIMIT", "30") or 30),
     )
 
 
@@ -242,6 +260,19 @@ class DynamoIncidentStore:
         )
         return res.get("Items", [])
 
+    def incidents_since(self, since_iso: str, limit: int) -> list:
+        """Su co co timestamp >= since_iso, moi nhat truoc, toi da `limit` (doc nhieu trang neu can)."""
+        items, kwargs = [], dict(
+            IndexName=self.INDEX, ScanIndexForward=False,
+            KeyConditionExpression=self._key("record_type").eq("INCIDENT") & self._key("timestamp").gte(since_iso))
+        while len(items) < limit:
+            res = self._table.query(Limit=limit - len(items), **kwargs)
+            items.extend(res.get("Items", []))
+            if "LastEvaluatedKey" not in res:
+                break
+            kwargs["ExclusiveStartKey"] = res["LastEvaluatedKey"]
+        return items[:limit]
+
     def recent_incidents(self, limit: int = 50) -> list:
         return self._by_type("INCIDENT", limit)
 
@@ -256,8 +287,27 @@ class DynamoIncidentStore:
         self._table.put_item(Item={"incident_id": f"REVOKED_SESSION#{sid}", "timestamp": "REVOKED",
                                    "ttl": int(expires_at)})
 
+    # Huy moi phien cua mot nguoi (doi vai tro / vo hieu hoa): cung tien to REVOKED_SESSION# nen dung chung quyen IAM.
+    # sid la token_urlsafe (khong co ':') nen khoa "user:..." khong trung voi phien nao.
+    def revoke_user(self, principal: str, at: float, expires_at: int) -> None:
+        self._table.put_item(Item={"incident_id": f"REVOKED_SESSION#user:{principal}", "timestamp": "REVOKED",
+                                   "revoked_at": Decimal(str(at)), "ttl": int(expires_at)})
+
+    def user_revoked_at(self, principal: str) -> float:
+        item = self._table.get_item(Key={"incident_id": f"REVOKED_SESSION#user:{principal}",
+                                         "timestamp": "REVOKED"}).get("Item")
+        return float(item["revoked_at"]) if item else 0.0
+
     def session_revoked(self, sid: str) -> bool:
         return "Item" in self._table.get_item(Key={"incident_id": f"REVOKED_SESSION#{sid}", "timestamp": "REVOKED"})
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)  # fromtimestamp() loi voi so am tren Windows
+
+
+def _read_secret(secret_id: str, region: str) -> str:
+    import boto3
+    return boto3.client("secretsmanager", region_name=region).get_secret_value(SecretId=secret_id)["SecretString"].strip()
 
 
 def _jsonable(value):
@@ -424,7 +474,39 @@ class SessionRevocations:
         self._store, self._clock, self._negative_ttl, self._max_entries = store, clock, negative_ttl, max_entries
         self._revoked = {}   # sid -> het han (epoch)
         self._clean = {}     # sid -> thoi diem phai hoi lai
+        # principal -> (thoi diem huy moi phien, hoi lai DynamoDB sau thoi diem nay). It muc: chi khi doi vai tro.
+        self._user_revoked = {}
         self._lock = threading.Lock()
+
+    def revoke_user(self, principal: str, at: float) -> None:
+        """Huy moi phien cua `principal` dang nhap truoc hoac dung thoi diem `at` (vua bi doi vai tro / vo hieu hoa).
+        Worker nay: ngay lap tuc. Worker khac: trong <= negative_ttl giay (ban ghi REVOKED_SESSION#user:...)."""
+        with self._lock:
+            self._user_revoked[principal] = (at, self._clock() + self._negative_ttl)
+        if hasattr(self._store, "revoke_user"):
+            try:
+                self._store.revoke_user(principal, at, int(at + SESSION_ABSOLUTE_SECONDS["local"] + 60))
+            except Exception as exc:
+                print(f"[WARN] Khong ghi duoc thu hoi theo nguoi dung ({type(exc).__name__})", flush=True)
+
+    def user_revoked_at(self, principal: str) -> float:
+        """Thoi diem gan nhat moi phien cua `principal` bi huy (0 neu chua)."""
+        now = self._clock()
+        with self._lock:
+            hit = self._user_revoked.get(principal)
+        if hit and hit[1] > now:
+            return hit[0]
+        at = hit[0] if hit else 0.0
+        if hasattr(self._store, "user_revoked_at"):
+            try:
+                at = max(at, float(self._store.user_revoked_at(principal) or 0))
+            except Exception as exc:
+                print(f"[WARN] Khong doc duoc thu hoi theo nguoi dung ({type(exc).__name__}) -> fail-open", flush=True)
+        with self._lock:
+            if len(self._user_revoked) >= self._max_entries:
+                self._user_revoked.clear()
+            self._user_revoked[principal] = (at, now + self._negative_ttl)
+        return at
 
     def revoke(self, sid: str, expires_at: float) -> None:
         with self._lock:
@@ -474,12 +556,26 @@ def _clean_email(value) -> Optional[str]:
 
 
 def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList] = None,
-               store=None, identity=None, clock: Callable[[], float] = time.time) -> Flask:
+               store=None, identity=None, clock: Callable[[], float] = time.time,
+               governance_store=None, executor=None, chat=None) -> Flask:
     config = config or load_config_from_env()
     blocklist = blocklist or BlockList(dynamodb_lookup(config.incident_table, config.region))
     store = store or DynamoIncidentStore(config.incident_table, config.region)
     if identity is None and config.cognito_user_pool_id and config.cognito_client_id:
         identity = cognito.CognitoIdentity(config.cognito_user_pool_id, config.cognito_client_id, config.region)
+    governance_store = governance_store or governance_mod.DynamoGovernanceStore(config.incident_table, config.region)
+    governance = governance_mod.Governance(governance_store,
+                                           identity=identity, clock=clock,
+                                           local_principal=f"local:{config.admin_user}")
+    if executor is None:
+        executor = (governance_lambda.LambdaExecutor(config.governance_function, config.region)
+                    if config.governance_function else governance_lambda.InProcessExecutor(governance, identity))
+    if chat is None and config.chat_model and config.chat_secret_id:
+        chat = chat_assistant.ChatAssistant(
+            chat_assistant.OpenAIProvider(config.chat_model,
+                                          key_loader=lambda: _read_secret(config.chat_secret_id, config.region)),
+            chat_assistant.DynamoChatQuota(config.incident_table, config.region),
+            knowledge=chat_assistant.load_knowledge(), daily_limit=config.chat_daily_limit)
     totp = pyotp.TOTP(config.totp_secret)
     logger = _security_logger(config.log_path)
     revocations = SessionRevocations(store, clock=clock)
@@ -509,7 +605,10 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
                 return jsonify({"error": "Unauthorized"}), 401
             # Thieu sid / login_at (cookie cu) -> coi nhu het han. Qua tuoi tho tuyet doi hoac da dang xuat -> tu choi.
             sid, limit = session.get("sid"), SESSION_ABSOLUTE_SECONDS.get(session.get("auth"), 0)
-            if not sid or clock() - session.get("login_at", 0) > limit or revocations.is_revoked(sid):
+            login_at = session.get("login_at", 0)
+            principal = f"{session.get('auth', 'local')}:{session['user']}"
+            if not sid or clock() - login_at > limit or revocations.is_revoked(sid) \
+                    or revocations.user_revoked_at(principal) >= login_at:  # vai tro vua doi / bi vo hieu hoa
                 session.clear()
                 return jsonify({"error": "Unauthorized"}), 401
             return view(*args, **kwargs)
@@ -522,6 +621,8 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
             def wrapper(*args, **kwargs):
                 if session.get("role") not in roles:
                     return jsonify({"error": "Forbidden"}), 403
+                if session.get("mfa_setup_required"):  # admin Cognito chua bat 2FA: chi duoc vao man hinh bat 2FA
+                    return jsonify({"error": "mfa_setup_required"}), 403
                 return view(*args, **kwargs)
             return wrapper
         return decorator
@@ -540,6 +641,18 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
             sent = request.headers.get("X-CSRF-Token", "")
             if not hmac.compare_digest(sent.encode(), str(session.get("csrf", "")).encode()) or not sent:
                 return jsonify({"error": "Bad CSRF token"}), 403
+            return view(*args, **kwargs)
+        return wrapper
+
+    def _unlocked() -> bool:
+        return session.get("gov_unlocked_until", 0) > clock()
+
+    def require_unlocked(view):
+        """Dung SAU require_role: muc Phan quyen phai dang mo (nhap PIN dung trong 10 phut qua)."""
+        @wraps(view)
+        def wrapper(*args, **kwargs):
+            if not _unlocked():
+                return jsonify({"error": "pin_required"}), 403
             return view(*args, **kwargs)
         return wrapper
 
@@ -666,13 +779,15 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
         session["sid"] = secrets.token_urlsafe(16)
         session["login_at"] = clock()
         session["csrf"] = secrets.token_urlsafe(32)
+        # Admin bat buoc 2FA. Admin da bat 2FA luon di qua buoc OTP (mfa_verified=True).
+        session["mfa_setup_required"] = result.role in _ADMIN_ROLES and not mfa_verified
         write_security_log("LOGIN_SUCCESS", 200, username=result.email, mfa_verified=mfa_verified,
                            auth="cognito", role=result.role)
         return jsonify({"ok": True, "role": result.role}), 200
 
     @app.get("/api/config")
     def api_config():
-        return jsonify({"cognito": identity is not None,
+        return jsonify({"cognito": identity is not None, "chat": chat is not None,
                         "min_password_level": password_strength.MIN_ACCEPTED_LEVEL}), 200
 
     def _identity_or_404():
@@ -841,7 +956,8 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
     @require_session
     def api_session():
         return jsonify({"user": session["user"], "csrf": session["csrf"],
-                        "role": session.get("role"), "auth": session.get("auth", "local")}), 200
+                        "role": session.get("role"), "auth": session.get("auth", "local"),
+                        "mfa_setup_required": bool(session.get("mfa_setup_required"))}), 200
 
     # ----------------------------- tai khoan & 2FA (nguoi dung tu bat/tat)
     @app.get("/api/account")
@@ -891,6 +1007,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
             return jsonify({"error": "Unauthorized"}), 401
         except cognito.IdentityError as exc:
             return _identity_error_response(exc)
+        session["mfa_setup_required"] = False  # vua chung minh duoc ma TOTP
         write_security_log("MFA_ENABLED", 200, username=session["user"])
         return jsonify({"ok": True, "mfa_enabled": True}), 200
 
@@ -899,6 +1016,8 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
     @require_csrf
     @require_cognito
     def api_mfa_disable():
+        if session.get("role") in _ADMIN_ROLES:
+            return jsonify({"error": "admin_mfa_required"}), 403  # admin bat buoc giu 2FA
         # Tat 2FA = ha muc bao ve -> hoi lai mat khau + OTP hien tai (chong ke chiem phien tu tat 2FA).
         body = _json()
         password, code = body.get("password"), str(body.get("code") or "").strip()[:10]
@@ -934,14 +1053,81 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
         except cognito.IdentityError as exc:
             return _identity_error_response(exc)
 
-    def _change_user(action: str, log_event: str):
-        username = str(_json().get("username") or "")[:128]
+    # ------------------------------------------- quan tri: muc Phan quyen (PIN rieng)
+    # Quy tac nam trong admin_governance.py; o day chi xac thuc, ghi log va dich loi sang HTTP.
+    def _principal() -> str:
+        return f"{session.get('auth', 'local')}:{session['user']}"
+
+    def _unlock_section() -> None:
+        session["gov_unlocked_until"] = clock() + governance_mod.UNLOCK_SECONDS
+
+    def _governance_error(exc: governance_mod.GovernanceError):
+        return jsonify({"error": exc.code}), exc.http
+
+    def _verify_pin(pin):
+        """None neu PIN dung, nguoc lai la response loi. Lan sai lam khoa PIN -> ADMIN_PIN_LOCKED (Detector canh bao)."""
         try:
-            email = getattr(identity, action)(username) if identity is not None and username else None
+            governance.check_pin(_principal(), pin)
+        except governance_mod.WrongPin as exc:
+            if exc.just_locked:
+                write_security_log("ADMIN_PIN_LOCKED", 403, username=session["user"], auth=session.get("auth"))
+            return _governance_error(exc)
+        except governance_mod.GovernanceError as exc:  # PinLocked
+            return _governance_error(exc)
+        return None
+
+    def _governed(call, pin_required: bool = True):
+        """Thao tac chay tren EC2 (doc trang thai, PIN): (ket qua, None) hoac (None, response loi)."""
+        if pin_required and (refused := _verify_pin(_json().get("pin"))):
+            return None, refused
+        try:
+            return call(), None
+        except governance_mod.GovernanceError as exc:
+            return None, _governance_error(exc)
         except cognito.IdentityError as exc:
-            return _identity_error_response(exc)
-        if not email:
-            return jsonify({"error": "not_found"}), 404
+            return None, _identity_error_response(exc)
+
+    # Su kien ghi khi thao tac ket thuc. Detector canh bao ADMIN_ROLE_CHANGED / USER_DISABLED (HIGH).
+    _EXECUTED_EVENT = {"promote": "ADMIN_ROLE_CHANGED", "demote": "ADMIN_ROLE_CHANGED", "disable": "USER_DISABLED"}
+
+    def _log_outcome(outcome: dict, created: bool = False) -> None:
+        common = dict(username=session["user"], action=outcome["action"], target_user=outcome["target_user"],
+                      request_id=outcome["id"])
+        if outcome["status"] == "executed":
+            # Vai tro doc luc dang nhap: huy moi phien cua nguoi bi tac dong de thay doi co hieu luc ngay
+            # (bi ha / vo hieu hoa mat quyen; duoc nang phai dang nhap lai va bat 2FA).
+            revocations.revoke_user(f"cognito:{outcome['target_user']}", clock())
+            write_security_log(_EXECUTED_EVENT[outcome["action"]], 200, approvers=outcome["approvers"],
+                               bootstrap=bool(outcome.get("bootstrap")), **common)
+        elif outcome["status"] == "rejected":
+            write_security_log("ROLE_REQUEST_REJECTED", 200, **common)
+        elif outcome["status"] == "pending" and created:
+            write_security_log("ROLE_REQUEST_CREATED", 200, **common)  # bao cac admin khac vao bo phieu
+        elif outcome["status"] == "failed":
+            write_security_log("ROLE_CHANGE_FAILED", 502, **common)
+
+    def _caller() -> dict:
+        """Danh tinh gui cho Lambda: token Cognito cua CHINH nguoi bam (Lambda tu hoi Cognito), hoac admin noi bo."""
+        return ({"access_token": session.get("access_token", "")} if session.get("auth") == "cognito"
+                else {"local": True})
+
+    def _execute(op: str, pin_required: bool = True, **params):
+        """Gui thao tac phan quyen cho executor (Lambda) kem token Cognito cua CHINH nguoi bam; Lambda tu xac minh
+        nguoi do la ai. Admin noi bo khong co token -> {"local": true}, Lambda chi tin trong che do khoi tao.
+        Tra ve (ket qua, None) hoac (None, response loi)."""
+        if pin_required and (refused := _verify_pin(_json().get("pin"))):
+            return None, refused
+        reply = executor({"op": op, "caller": _caller(), **params})
+        if "error" in reply:
+            if isinstance(reply.get("outcome"), dict):
+                _log_outcome(reply["outcome"])   # vd Cognito loi khi thuc thi -> ROLE_CHANGE_FAILED
+            return None, (jsonify({"error": reply["error"]}), int(reply.get("http", 502)))
+        return reply["result"], None
+
+    def _manage_viewer(op: str, log_event: str):
+        email, refused = _execute(op, pin_required=False, username=str(_json().get("username") or "")[:128])
+        if refused:
+            return refused
         write_security_log(log_event, 200, username=session["user"], target_user=email)
         return jsonify({"ok": True}), 200
 
@@ -949,15 +1135,94 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
     @require_session
     @require_csrf
     @require_role(*_ADMIN_ROLES)
+    @require_unlocked
     def api_users_approve():
-        return _change_user("approve", "USER_APPROVED")
+        return _manage_viewer("approve_viewer", "USER_APPROVED")
 
     @app.post("/api/users/revoke")
     @require_session
     @require_csrf
     @require_role(*_ADMIN_ROLES)
+    @require_unlocked
     def api_users_revoke():
-        return _change_user("revoke", "USER_REVOKED")
+        return _manage_viewer("revoke_viewer", "USER_REVOKED")
+
+    @app.get("/api/governance")
+    @require_session
+    @require_role(*_ADMIN_ROLES)
+    def api_governance():
+        info, refused = _governed(governance.summary, pin_required=False)  # canh bao do: ca khi chua mo PIN
+        if refused:
+            return refused
+        info.update(has_pin=governance.has_pin(_principal()), unlocked=_unlocked(), server_time=clock(),
+                    unlocked_until=session.get("gov_unlocked_until") if _unlocked() else None)
+        if _unlocked():
+            requests, refused = _governed(governance.pending_requests, pin_required=False)
+            if refused:
+                return refused
+            info["requests"] = requests
+        return jsonify(info), 200
+
+    @app.post("/api/governance/pin")
+    @require_session
+    @require_csrf
+    @require_role(*_ADMIN_ROLES)
+    def api_governance_set_pin():
+        _, refused = _governed(lambda: governance.set_pin(_principal(), _json().get("pin")), pin_required=False)
+        if refused:
+            return refused
+        _unlock_section()
+        return jsonify({"ok": True}), 200
+
+    @app.post("/api/governance/unlock")
+    @require_session
+    @require_csrf
+    @require_role(*_ADMIN_ROLES)
+    def api_governance_unlock():
+        if (refused := _verify_pin(_json().get("pin"))):
+            return refused
+        _unlock_section()
+        return jsonify({"ok": True}), 200
+
+    @app.post("/api/governance/pin/reset")
+    @require_session
+    @require_csrf
+    @require_role(*_ADMIN_ROLES)
+    @require_unlocked
+    def api_governance_reset_pin():
+        email, refused = _governed(lambda: governance.reset_pin(_principal(), _json().get("username")))
+        if refused:
+            return refused
+        write_security_log("ADMIN_PIN_RESET", 200, username=session["user"], target_user=email)
+        return jsonify({"ok": True}), 200
+
+    @app.post("/api/governance/requests")
+    @require_session
+    @require_csrf
+    @require_role(*_ADMIN_ROLES)
+    @require_unlocked
+    def api_governance_create_request():
+        body = _json()
+        outcome, refused = _execute("create", action=body.get("action"), username=body.get("username"))
+        if refused:
+            return refused
+        _log_outcome(outcome, created=True)
+        return jsonify(outcome), 200
+
+    @app.post("/api/governance/requests/<request_id>/vote")
+    @require_session
+    @require_csrf
+    @require_role(*_ADMIN_ROLES)
+    @require_unlocked
+    def api_governance_vote(request_id):
+        decision = _json().get("decision")
+        if decision not in ("approve", "reject"):
+            return jsonify({"error": "invalid_request"}), 400
+        outcome, refused = _execute("vote", request_id=request_id[:64], approve=decision == "approve")
+        if refused:
+            return refused
+        _log_outcome(outcome)
+        return jsonify(outcome), 200
 
     @app.post("/api/logout")
     @require_session
@@ -981,6 +1246,43 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
             return jsonify({"error": "Khong doc duoc du lieu su co"}), 502
         return jsonify({"incidents": incidents, "blocks": blocks, "server_time": int(time.time())}), 200
 
+    # khoang -> (so o, do dai o, so su co doc toi da, giay luu ket qua). 7/30 ngay doc nhieu hon nen luu 5 phut:
+    # nhieu nguoi xem / bam lien tuc chi ton 1 lan doc DynamoDB (chong Denial of Wallet).
+    STATS_RANGES = {"24h": (24, 3600, 1000, 0), "7d": (7, 86400, 5000, 300), "30d": (30, 86400, 5000, 300)}
+    stats_cache, stats_lock = {}, threading.Lock()
+
+    @app.get("/api/stats")
+    @require_session
+    @require_role(*_DATA_ROLES)
+    def api_stats():
+        rng = request.args.get("range", "24h")
+        try:
+            tz = int(request.args.get("tz", "0"))
+        except ValueError:
+            tz = None
+        if rng not in STATS_RANGES or tz is None or not -720 <= tz <= 840:
+            return jsonify({"error": "Khoang thoi gian hoac mui gio khong hop le"}), 400
+        slots, slot_seconds, limit, ttl = STATS_RANGES[rng]
+        now = clock()
+        with stats_lock:
+            hit = stats_cache.get((rng, tz))
+        if hit and hit[0] > now:
+            return jsonify(hit[1]), 200
+        since = (_EPOCH + timedelta(seconds=incident_stats.window_start(now, slots, slot_seconds, tz))).isoformat()
+        try:
+            items = store.incidents_since(since, limit)
+        except Exception as exc:
+            print(f"[ERROR] Thong ke doc du lieu loi: {type(exc).__name__}", flush=True)
+            return jsonify({"error": "Khong doc duoc du lieu su co"}), 502
+        summary = incident_stats.summarize(items, now, slots=slots, slot_seconds=slot_seconds, tz_minutes=tz)
+        summary.update(range=rng, limit=limit, truncated=len(items) >= limit)
+        if ttl:
+            with stats_lock:
+                if len(stats_cache) >= 64:   # tz tuy y khong lam phinh bo nho
+                    stats_cache.clear()
+                stats_cache[(rng, tz)] = (now + ttl, summary)
+        return jsonify(summary), 200
+
     @app.post("/api/unblock")
     @require_session
     @require_csrf
@@ -989,13 +1291,47 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
         ip = _valid_ip(_json().get("ip", ""))  # _json(): body khong phai object (vd so, mang) -> {} thay vi 500
         if not ip:
             return jsonify({"error": "IP khong hop le"}), 400
+        return _unblock(ip, "Go khoa that bai")
+
+    @app.post("/api/chat")
+    @require_session
+    @require_csrf
+    @require_role(*_DATA_ROLES)
+    def api_chat():
+        if chat is None:
+            return jsonify({"error": "Not Found"}), 404
+        body = _json()
+        incident_id = body.get("incident_id")
+        try:
+            recent = [_incident_view(i) for i in store.recent_incidents(50)]
+        except Exception as exc:
+            print(f"[ERROR] Chat doc su co loi: {type(exc).__name__}", flush=True)
+            return jsonify({"error": "Khong doc duoc du lieu su co"}), 502
+        if incident_id is not None:
+            # Chi su co nguoi dung von xem duoc trong Console (50 su co gan nhat)
+            recent = [i for i in recent if i["id"] == incident_id]
+            if not recent:
+                return jsonify({"error": "Không tìm thấy sự cố"}), 404
+        try:
+            answer = chat.ask(_principal(), body.get("message"), incidents=recent)
+        except chat_assistant.ChatError as exc:
+            if isinstance(exc, chat_assistant.ChatUnavailable):
+                print(f"[ERROR] Tro ly AI loi: {type(exc.__cause__).__name__}", flush=True)
+            return jsonify({"error": str(exc)}), exc.status
+        # Khong ghi noi dung cau hoi/tra loi vao log (co the chua thong tin nhay cam)
+        write_security_log("CHAT_QUESTION", 200, username=session["user"],
+                           incident_id=incident_id, question_chars=len(body.get("message") or ""))
+        return jsonify({"answer": answer}), 200
+
+    def _unblock(ip: str, failure_message: str, **audit):
+        """Go khoa IP va ghi ADMIN_UNBLOCK (+ truong audit)."""
         try:
             store.unblock(ip)
         except Exception as exc:
             print(f"[ERROR] Go khoa loi: {type(exc).__name__}", flush=True)
-            return jsonify({"error": "Go khoa that bai"}), 502
+            return jsonify({"error": failure_message}), 502
         blocklist.forget(ip)
-        write_security_log("ADMIN_UNBLOCK", 200, username=session["user"], unblocked_ip=ip)
+        write_security_log("ADMIN_UNBLOCK", 200, username=session["user"], unblocked_ip=ip, **audit)
         return jsonify({"ok": True, "ip": ip}), 200
 
     @app.get("/search")

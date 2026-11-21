@@ -4,8 +4,10 @@ Buoc 4 + Lat cat 5 (GameDay): gia lap tan cong web cho LogSentinel.
   # Che do 1 - bom log gia thang vao CloudWatch (khong can EC2, test luat cua Detector):
   python attack_sim.py logs --ip 198.51.100.23
 
-  # Che do 2 - tan cong that qua Nginx HTTPS (E2E: 403 SOAR, DynamoDB BLOCKED_IP#, email/Telegram):
-  python attack_sim.py http --target https://<Public-IP> --insecure
+  # Che do 2 - tan cong that (E2E: 403 SOAR, DynamoDB BLOCKED_IP#, email/Telegram):
+  python attack_sim.py http --target https://<chuoi>.cloudfront.net      # che do edge (output SocConsoleUrl)
+  python attack_sim.py http --target https://<Public-IP> --insecure       # che do truc tiep (chung chi tu ky)
+  Chay tu mang KHAC admin_cidr (vd 4G): IP trong admin_cidr duoc ghi nhan nhung khong bao gio bi khoa.
 
 Chi dung tren he thong cua chinh ban. IP mau thuoc dai tai lieu RFC 5737.
 """

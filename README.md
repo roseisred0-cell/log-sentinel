@@ -56,6 +56,6 @@ cdk deploy --all --require-approval never -c enable_edge=true \
     -c console_cidrs=<dải-ip-văn-phòng>          # tùy chọn: chỉ dải này vào được Console
 ```
 
-Tham số khác: `-c monthly_budget_usd=20` (cảnh báo chi phí tài khoản qua email, `0` để tắt), `-c detector_max_concurrency=5` (trần Lambda chạy song song, cần quota tài khoản ≥ 105), `-c enable_app_log_archive=true` (Firehose → S3).
+Tham số khác: `-c monthly_budget_usd=20` (cảnh báo chi phí tài khoản qua email, `0` để tắt), `-c detector_max_concurrency=5` (trần Lambda chạy song song, cần quota tài khoản ≥ 105).
 
 Dọn dẹp: `cdk destroy --all` nếu đã bật edge, hoặc `cdk destroy` (mọi resource đều để `RemovalPolicy.DESTROY`).

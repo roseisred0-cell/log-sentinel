@@ -4,11 +4,17 @@
   "use strict";
   var REFRESH_MS = 15000;
   var ROLE_LABEL = { admin: "Quản trị", viewer: "Người xem", pending: "Chờ duyệt" };
-  var csrf = "", timer = null, lastData = null, role = "", authKind = "local";
-  var cfg = { cognito: false, min_password_level: 2 };
+  var csrf = "", timer = null, lastData = null, role = "", authKind = "local", mfaSetupRequired = false;
+  var cfg = { cognito: false, chat: false, min_password_level: 2 };
+  // Bang Su co gan day: mac dinh chi hien 10 dong moi nhat, bam "Xem them" de mo het (giu trang thai khi tu lam moi).
+  var INCIDENT_PREVIEW = 10, incidentsExpanded = false;
+  var chatIncident = null;   // su co dang hoi tro ly AI (null = cac su co gan day)
+  // Thong ke: 24 gio tu lam moi moi 60 giay; 7 / 30 ngay chi tai khi bam chon (doc toi 5.000 su co).
+  var STATS_MS = 60000, statsTimer = null, statsRange = "24h";
   var pendingEmail = "";
   var $ = function (id) { return document.getElementById(id); };
-  var canViewData = function () { return role === "admin" || role === "viewer"; };
+  // Quan tri vien Cognito chua bat 2FA: chi duoc vao muc Tai khoan de bat 2FA (may chu cung chan).
+  var canViewData = function () { return (role === "admin" || role === "viewer") && !mfaSetupRequired; };
 
   function api(path, options) {
     options = options || {};
@@ -42,12 +48,21 @@
     return h + " giờ " + m + " phút";
   }
 
-  function summarize(details) {
-    var skip = { client_ip: 1, ip: 1, username: 1, user: 1, actor: 1, timestamp: 1, source: 1, event_type: 1, severity: 1 };
-    return Object.keys(details || {}).filter(function (k) { return !skip[k]; }).map(function (k) {
-      var v = details[k];
-      return k + ": " + (typeof v === "object" ? JSON.stringify(v) : v);
-    }).join(" · ");
+  // Cot Chi tiet: cau tieng Viet de doc (incident-text.js) + nut "Xem du lieu goc" mo JSON day du.
+  // Moi gia tri chen bang textContent: payload tan cong trong du lieu goc chi hien thanh chu.
+  function detailsCell(incident, sentence) {
+    var td = document.createElement("td"), p = document.createElement("div");
+    td.className = "details";
+    p.textContent = sentence;
+    td.appendChild(p);
+    var box = document.createElement("details"), summary = document.createElement("summary");
+    var pre = document.createElement("pre");
+    summary.textContent = "Xem dữ liệu gốc";
+    pre.textContent = JSON.stringify(incident.details || {}, null, 2);
+    box.appendChild(summary);
+    box.appendChild(pre);
+    td.appendChild(box);
+    return td;
   }
 
   // ------------------------------------------------------------ du lieu su co
@@ -63,7 +78,9 @@
 
     var tb = $("incidents");
     tb.replaceChildren();
-    incidents.forEach(function (i) {
+    var hiddenCount = incidents.length - INCIDENT_PREVIEW;
+    var shown = incidentsExpanded ? incidents : incidents.slice(0, INCIDENT_PREVIEW);
+    shown.forEach(function (i) {
       var tr = document.createElement("tr");
       tr.appendChild(cell(localTime(i.time)));
       var sev = document.createElement("td"), badge = document.createElement("span");
@@ -72,12 +89,25 @@
       sev.appendChild(badge);
       tr.appendChild(sev);
       tr.appendChild(cell(i.rule, "mono"));
+      var text = IncidentText.describe(i);
       tr.appendChild(cell(i.ip, "mono"));
-      tr.appendChild(cell(i.actor));
-      tr.appendChild(cell(summarize(i.details), "details"));
+      tr.appendChild(cell(text.subject));
+      var details = detailsCell(i, text.sentence);
+      if (cfg.chat) {   // nut nam trong o Chi tiet (khong them cot: bang da rong)
+        var ask = document.createElement("button");
+        ask.type = "button"; ask.className = "small ask-ai"; ask.textContent = "Hỏi AI";
+        ask.addEventListener("click", function () { chatAbout(i); });
+        details.appendChild(ask);
+      }
+      tr.appendChild(details);
       tb.appendChild(tr);
     });
     $("incidents-empty").hidden = incidents.length > 0;
+    var more = $("incidents-more");
+    more.hidden = hiddenCount <= 0;
+    more.setAttribute("aria-expanded", String(incidentsExpanded));
+    more.textContent = incidentsExpanded ? "Thu gọn (chỉ hiện " + INCIDENT_PREVIEW + " sự cố mới nhất)"
+                                         : "Xem thêm " + hiddenCount + " sự cố";
 
     var bb = $("blocks");
     bb.replaceChildren();
@@ -136,13 +166,16 @@
 
   function showLogin() {
     clearInterval(timer);
-    role = ""; csrf = "";
+    clearInterval(govClock);
+    clearInterval(statsTimer);
+    role = ""; csrf = ""; mfaSetupRequired = false;
     $("app-view").hidden = true; $("userbox").hidden = true; $("login-view").hidden = false;
     showPanel("login");
   }
 
   function showApp(info) {
     csrf = info.csrf; role = info.role || ""; authKind = info.auth || "local";
+    mfaSetupRequired = !!info.mfa_setup_required;
     $("username").textContent = info.user;
     var badge = $("role-badge");
     badge.textContent = ROLE_LABEL[role] || role;
@@ -151,14 +184,22 @@
 
     $("data-view").hidden = !canViewData();
     $("pending-notice").hidden = role !== "pending";
-    $("users-card").hidden = role !== "admin";
-    $("account-card").hidden = role !== "pending";   // nguoi cho duyet: mo san de bat 2FA
+    $("mfa-required-notice").hidden = !mfaSetupRequired;
+    $("gov-card").hidden = role !== "admin" || mfaSetupRequired;
+    $("chat-card").hidden = !(cfg.chat && canViewData());
+    // nguoi cho duyet va admin chua bat 2FA: mo san muc Tai khoan de bat 2FA
+    $("account-card").hidden = !(role === "pending" || mfaSetupRequired);
     $("mfa-setup").hidden = true;
     $("mfa-disable").hidden = true;
+    govNotify();
 
     clearInterval(timer);
-    if (canViewData()) { load(); timer = setInterval(load, REFRESH_MS); }
-    if (role === "admin") loadUsers();
+    clearInterval(statsTimer);
+    if (canViewData()) {
+      load(); timer = setInterval(load, REFRESH_MS);
+      selectRange(statsRange);
+    }
+    if (role === "admin" && !mfaSetupRequired) loadGov();
     loadAccount();
   }
 
@@ -394,13 +435,18 @@
         toggle.hidden = true;
         return;
       }
-      toggle.hidden = false;
+      var adminLocked = a.role === "admin" && a.mfa_enabled;   // quan tri vien khong duoc tat 2FA
+      toggle.hidden = adminLocked;
       toggle.setAttribute("data-enabled", a.mfa_enabled ? "1" : "0");
       toggle.textContent = a.mfa_enabled ? "Tắt 2FA" : "Bật 2FA";
       $("mfa-state").textContent = a.mfa_enabled ? "đang BẬT" : "đang TẮT";
-      $("mfa-note").textContent = a.mfa_enabled
-        ? "Mỗi lần đăng nhập bạn cần thêm mã 6 số từ ứng dụng Authenticator."
-        : "Khuyến nghị bật 2FA: nếu chỉ có mật khẩu, tài khoản dễ bị chiếm khi mật khẩu bị lộ.";
+      $("mfa-note").textContent = adminLocked
+        ? "Quản trị viên bắt buộc dùng 2FA nên không có nút tắt."
+        : a.mfa_enabled
+          ? "Mỗi lần đăng nhập bạn cần thêm mã 6 số từ ứng dụng Authenticator."
+          : a.role === "admin"
+            ? "Quản trị viên bắt buộc bật 2FA trước khi xem dữ liệu."
+            : "Khuyến nghị bật 2FA: nếu chỉ có mật khẩu, tài khoản dễ bị chiếm khi mật khẩu bị lộ.";
     }).catch(function () { $("account-error").textContent = "Mất kết nối tới máy chủ."; });
   }
 
@@ -459,47 +505,317 @@
       $("mfa-setup").hidden = true;
       $("mfa-secret").textContent = "";
       $("mfa-qr").replaceChildren();
+      if (mfaSetupRequired) return start();   // admin vua bat 2FA: tai lai phien de mo du lieu va Phan quyen
       loadAccount();
     });
   });
 
-  // -------------------------------------------------- quan tri duyet nguoi dung
-  function userRow(u, label, action) {
+  // ------------------------------------------------------- muc Phan quyen
+  // PIN rieng 6 so; mo 10 phut. Nang/ha/vo hieu hoa can phieu cua cac quan tri vien khac (admin_governance.py).
+  var GOV_ERRORS = {
+    weak_pin: "PIN phải đúng 6 chữ số và không dễ đoán (vd 123456, 000000, 121212).",
+    pin_exists: "Bạn đã có PIN.", wrong_pin: "PIN không đúng.",
+    pin_locked: "PIN đang bị khóa 15 phút do nhập sai nhiều lần.",
+    pin_required: "Mục Phân quyền đã tự khóa, hãy nhập lại PIN.",
+    busy: "Một thao tác phân quyền khác đang chạy, thử lại sau vài giây.",
+    local_admin_restricted: "Đã đủ 2 quản trị viên: tài khoản admin nội bộ chỉ còn xem và gỡ khóa IP.",
+    not_admin: "Chỉ quản trị viên được làm thao tác này.",
+    unauthenticated: "Phiên đăng nhập không còn hợp lệ với hệ thống phân quyền, hãy đăng nhập lại.",
+    upstream: "Dịch vụ tài khoản đang lỗi nên chưa thực hiện được. Yêu cầu vẫn được giữ; bấm Đồng ý lại để thử lại.",
+    invalid_target: "Không thực hiện được với tài khoản này.",
+    self_action: "Bạn không thể tự thao tác lên tài khoản của chính mình.",
+    min_admins: "Phải luôn còn ít nhất 2 quản trị viên.",
+    not_enough_admins: "Chưa đủ quản trị viên để duyệt thao tác này.",
+    local_admin_no_vote: "Đã đủ 2 quản trị viên: tài khoản admin nội bộ không còn quyền bỏ phiếu.",
+    not_a_voter: "Bạn không được bỏ phiếu cho yêu cầu này.",
+    already_voted: "Bạn đã đồng ý yêu cầu này rồi.", request_closed: "Yêu cầu đã kết thúc.",
+    request_expired: "Yêu cầu đã hết hạn (24 giờ).", not_found: "Không tìm thấy.",
+    execution_failed: "Không thực hiện được: danh sách người dùng đã thay đổi.",
+    invalid_request: "Yêu cầu không hợp lệ."
+  };
+  var ACTION_LABEL = { promote: "Nâng lên Quản trị", demote: "Hạ xuống Người xem", disable: "Vô hiệu hóa" };
+  var govClock = null, govUntil = 0, clockOffset = 0;
+
+  function govMessage(r) {
+    return GOV_ERRORS[r.body.error] || "Thao tác thất bại (" + (r.body.error || r.status) + ").";
+  }
+
+  function govNotify(err, ok) { $("gov-error").textContent = err || ""; $("gov-ok").textContent = ok || ""; }
+
+  function showGovState(state) {
+    ["setpin", "unlock", "open"].forEach(function (s) { $("gov-" + s).hidden = s !== state; });
+    var first = $("gov-" + state).querySelector("input");
+    if (first && state !== "open") first.focus();
+  }
+
+  function tickGovClock() {
+    var left = Math.round(govUntil - (Date.now() / 1000 + clockOffset));
+    if (left <= 0) { clearInterval(govClock); $("gov-timer").textContent = ""; return loadGov(); }
+    $("gov-timer").textContent = "Tự khóa sau " + Math.floor(left / 60) + ":" + ("0" + (left % 60)).slice(-2);
+  }
+
+  function loadGov() {
+    return api("/api/governance").then(function (r) {
+      if (r.status === 401) return showLogin();
+      if (r.status === 403 && r.body.error === "mfa_setup_required") return start();
+      if (r.status !== 200) { govNotify("Không tải được mục Phân quyền."); return; }
+      var g = r.body;
+      clearInterval(govClock);
+      renderGovSummary(g);   // canh bao do duoi 2 admin: hien ca khi muc dang khoa
+      if (!g.has_pin) { $("gov-timer").textContent = ""; pendingHint(false); return showGovState("setpin"); }
+      if (!g.unlocked) { $("gov-timer").textContent = ""; pendingHint(true); return showGovState("unlock"); }
+      $("gov-pending-hint").hidden = true;   // muc da mo: danh sach cho duyet hien ngay ben duoi
+      showGovState("open");
+      clockOffset = g.server_time - Date.now() / 1000;
+      govUntil = g.unlocked_until;
+      tickGovClock();
+      govClock = setInterval(tickGovClock, 1000);
+      renderRequests(g.requests || []);
+      return loadUsers();
+    }).catch(function () { govNotify("Mất kết nối tới máy chủ."); });
+  }
+
+  // Muc dang khoa: van bao co bao nhieu tai khoan cho duyet (chi dem, khong lo email) de admin biet vi sao can PIN.
+  function pendingHint(hasPin) {
+    var hint = $("gov-pending-hint");
+    api("/api/users").then(function (r) {
+      var n = r.status === 200 && r.body.pending ? r.body.pending.length : 0;
+      hint.hidden = n === 0;
+      hint.textContent = "Có " + n + " tài khoản đang chờ duyệt. " +
+        (hasPin ? "Nhập PIN bên dưới để mở mục và duyệt." : "Đặt PIN bên dưới để mở mục và duyệt.");
+    }).catch(function () { hint.hidden = true; });
+  }
+
+  function renderGovSummary(g) {
+    var warn = $("gov-min-warning"), boot = $("gov-bootstrap");
+    warn.hidden = g.admin_count >= 2;
+    warn.textContent = "Hiện có " + g.admin_count + " quản trị viên, tối thiểu phải là 2.";
+    boot.hidden = !g.bootstrap;
+    boot.textContent = authKind === "local"
+      ? "Chế độ khởi tạo: bạn (admin nội bộ) được tự nâng một Người xem lên Quản trị cho tới khi đủ 2 quản trị viên."
+      : "Chế độ khởi tạo: admin nội bộ được bỏ phiếu thay người thứ hai cho tới khi đủ 2 quản trị viên.";
+  }
+
+  function renderRequests(requests) {
+    var tb = $("gov-requests");
+    tb.replaceChildren();
+    requests.forEach(function (q) {
+      var tr = document.createElement("tr");
+      tr.appendChild(cell(ACTION_LABEL[q.action] || q.action));
+      tr.appendChild(cell(q.target_user));
+      tr.appendChild(cell(q.initiator));
+      tr.appendChild(cell(q.approvals + "/" + q.needed));
+      tr.appendChild(cell(localTime(q.expires_at * 1000), "muted"));
+      var td = document.createElement("td");
+      td.appendChild(govButton("Đồng ý", function () {
+        return govAction("/api/governance/requests/" + encodeURIComponent(q.id) + "/vote", { decision: "approve" });
+      }));
+      td.appendChild(govButton("Từ chối", function () {
+        if (!window.confirm("Từ chối sẽ hủy yêu cầu ngay. Tiếp tục?")) return null;
+        return govAction("/api/governance/requests/" + encodeURIComponent(q.id) + "/vote", { decision: "reject" });
+      }));
+      tr.appendChild(td);
+      tb.appendChild(tr);
+    });
+    $("gov-requests-empty").hidden = requests.length > 0;
+  }
+
+  function govButton(label, onClick) {
+    var btn = document.createElement("button");
+    btn.type = "button"; btn.className = "small"; btn.textContent = label;
+    btn.addEventListener("click", function () {
+      var pending = onClick();
+      if (!pending) return;
+      btn.disabled = true;
+      pending.then(function () { btn.disabled = false; });
+    });
+    return btn;
+  }
+
+  // Thao tac can PIN xac nhan (tao yeu cau, bo phieu, dat lai PIN).
+  function govAction(path, body) {
+    var pin = $("gov-pin").value.trim();
+    if (!/^[0-9]{6}$/.test(pin)) { govNotify("Nhập PIN xác nhận (6 số) trước khi thao tác."); $("gov-pin").focus(); return null; }
+    govNotify();
+    return post(path, Object.assign({ pin: pin }, body)).then(function (r) {
+      $("gov-pin").value = "";
+      if (r.status === 401) return showLogin();
+      if (r.status !== 200) { govNotify(govMessage(r)); return loadGov(); }
+      var msg = { pending: "Đã ghi phiếu. Đang chờ các quản trị viên khác đồng ý.",
+                  executed: "Đã thực hiện: " + (ACTION_LABEL[r.body.action] || "") + " " + (r.body.target_user || "") + ".",
+                  rejected: "Đã từ chối và hủy yêu cầu." };
+      govNotify("", msg[r.body.status] || "Đã lưu.");
+      return loadGov();
+    }).catch(function () { govNotify("Mất kết nối tới máy chủ."); });
+  }
+
+  function propose(action, u) {
+    if (!window.confirm(ACTION_LABEL[action] + ": " + u.email + "?\nCác quản trị viên khác cần đồng ý thì mới có hiệu lực.")) return null;
+    return govAction("/api/governance/requests", { action: action, username: u.username });
+  }
+
+  function simpleUserAction(action, u) {
+    if (action === "revoke" && !window.confirm("Thu hồi quyền xem của " + u.email + "?")) return null;
+    govNotify();
+    return post("/api/users/" + action, { username: u.username }).then(function (r) {
+      if (r.status !== 200) govNotify(govMessage(r));
+      return loadGov();
+    });
+  }
+
+  function userRow(u, buttons) {
     var tr = document.createElement("tr");
     tr.appendChild(cell(u.email));
     tr.appendChild(cell(u.created ? localTime(u.created) : "", "muted"));
-    var td = document.createElement("td"), btn = document.createElement("button");
-    btn.type = "button"; btn.className = "small"; btn.textContent = label;
-    btn.addEventListener("click", function () {
-      if (action === "revoke" && !window.confirm("Thu hồi quyền xem của " + u.email + "?")) return;
-      btn.disabled = true;
-      post("/api/users/" + action, { username: u.username }).then(function (r) {
-        if (r.status !== 200) $("app-error").textContent = "Thao tác thất bại (" + (r.body.error || r.status) + ").";
-        loadUsers();
-      });
-    });
-    td.appendChild(btn); tr.appendChild(td);
+    var td = document.createElement("td");
+    if (u.email !== $("username").textContent) buttons.forEach(function (b) { td.appendChild(govButton(b[0], b[1])); });
+    tr.appendChild(td);
     return tr;
   }
 
-  function fillUsers(tbodyId, emptyId, rows, label, action) {
+  function fillUsers(tbodyId, emptyId, rows, buttonsFor) {
     var tb = $(tbodyId);
     tb.replaceChildren();
-    rows.forEach(function (u) { tb.appendChild(userRow(u, label, action)); });
+    rows.forEach(function (u) { tb.appendChild(userRow(u, buttonsFor(u))); });
     $(emptyId).hidden = rows.length > 0;
   }
 
   function loadUsers() {
-    api("/api/users").then(function (r) {
-      if (r.status !== 200) { $("app-error").textContent = "Không tải được danh sách người dùng."; return; }
-      fillUsers("users-pending", "users-pending-empty", r.body.pending, "Duyệt", "approve");
-      fillUsers("users-viewers", "users-viewers-empty", r.body.viewers, "Thu hồi", "revoke");
-      var admins = r.body.admins.map(function (u) { return u.email; });
-      $("users-admins").textContent = admins.length ? "Quản trị viên (Cognito): " + admins.join(", ") : "";
+    return api("/api/users").then(function (r) {
+      if (r.status !== 200) { govNotify("Không tải được danh sách người dùng."); return; }
+      fillUsers("users-pending", "users-pending-empty", r.body.pending, function (u) {
+        return [["Duyệt", function () { return simpleUserAction("approve", u); }]];
+      });
+      fillUsers("users-viewers", "users-viewers-empty", r.body.viewers, function (u) {
+        return [["Thu hồi", function () { return simpleUserAction("revoke", u); }],
+                ["Đề xuất lên Quản trị", function () { return propose("promote", u); }],
+                ["Vô hiệu hóa", function () { return propose("disable", u); }]];
+      });
+      fillUsers("users-admins", "users-admins-empty", r.body.admins, function (u) {
+        return [["Đề xuất hạ quyền", function () { return propose("demote", u); }],
+                ["Vô hiệu hóa", function () { return propose("disable", u); }],
+                ["Đặt lại PIN", function () {
+                  if (!window.confirm("Xóa PIN của " + u.email + "? Người đó sẽ tự đặt PIN mới ở lần vào sau.")) return null;
+                  return govAction("/api/governance/pin/reset", { username: u.username });
+                }]];
+      });
     });
   }
 
+  $("gov-setpin-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var form = ev.target;
+    if (form.pin.value !== form.pin2.value) { govNotify("Hai lần nhập PIN chưa giống nhau."); return; }
+    govNotify();
+    post("/api/governance/pin", { pin: form.pin.value }).then(function (r) {
+      form.reset();
+      if (r.status !== 200) { govNotify(govMessage(r)); return; }
+      govNotify("", "Đã đặt PIN. Mục Phân quyền mở trong 10 phút.");
+      loadGov();
+    });
+  });
+
+  $("gov-unlock-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var form = ev.target;
+    govNotify();
+    post("/api/governance/unlock", { pin: form.pin.value }).then(function (r) {
+      form.reset();
+      if (r.status !== 200) { govNotify(govMessage(r)); return; }
+      loadGov();
+    });
+  });
+
+  // ------------------------------------------------------------- thong ke
+  function selectRange(rng) {
+    statsRange = rng;
+    Array.prototype.forEach.call($("stats-range").querySelectorAll("button"), function (b) {
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-range") === rng));
+    });
+    clearInterval(statsTimer);
+    loadStats();
+    if (rng === "24h") statsTimer = setInterval(loadStats, STATS_MS);
+  }
+
+  $("stats-range").addEventListener("click", function (ev) {
+    var b = ev.target.closest("button[data-range]");
+    if (b) selectRange(b.getAttribute("data-range"));
+  });
+
+  function loadStats() {
+    $("stats-note").textContent = "Đang tải…";
+    var tz = -new Date().getTimezoneOffset();   // phut lech UTC cua nguoi xem: ngay bat dau luc 00:00 gio dia phuong
+    api("/api/stats?range=" + encodeURIComponent(statsRange) + "&tz=" + tz).then(function (r) {
+      if (r.status === 401) { showLogin(); return; }
+      if (r.status !== 200) { $("stats-note").textContent = "Không tải được thống kê."; return; }
+      try {
+        IncidentCharts.render(r.body, { hourly: $("stats-hourly"), matrix: $("stats-matrix"),
+                                        table: $("stats-table"), note: $("stats-note"), legend: $("stats-legend"),
+                                        tip: $("viz-tip") });
+      } catch (e) {   // du lieu khong dung dinh dang: bao dung loi, khong nham voi mat mang
+        $("stats-note").textContent = "Không vẽ được thống kê (dữ liệu không hợp lệ).";
+      }
+    }).catch(function () { $("stats-note").textContent = "Mất kết nối tới máy chủ."; });
+  }
+
+  // ------------------------------------------------------------- tro ly AI
+  // Cau tra loi cua AI la du lieu khong tin cay (co the bi log tan cong dan dat): chi hien bang textContent.
+  function chatLine(who, text) {
+    var p = document.createElement("p");
+    p.className = "msg " + who;
+    p.textContent = text;
+    $("chat-log").appendChild(p);
+    $("chat-log").scrollTop = $("chat-log").scrollHeight;
+    return p;
+  }
+
+  function chatAbout(incident) {
+    chatIncident = incident;
+    $("chat-context").textContent = incident ? (incident.rule + " lúc " + localTime(incident.time)) : "các sự cố gần đây";
+    $("chat-clear").hidden = !incident;
+    if (incident && !$("chat-input").value) $("chat-input").value = "Sự cố này là gì, có nguy hiểm không, cần khắc phục thế nào?";
+    $("chat-card").scrollIntoView({ behavior: "smooth" });
+    $("chat-input").focus();
+  }
+
+  $("chat-clear").addEventListener("click", function () { chatAbout(null); });
+
+  $("chat-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var message = $("chat-input").value.trim();
+    if (!message) return;
+    var body = { message: message };
+    if (chatIncident) body.incident_id = chatIncident.id;
+    $("chat-error").textContent = "";
+    $("chat-send").disabled = true;
+    chatLine("user", message);
+    var waiting = chatLine("ai muted", "Đang phân tích…");
+    post("/api/chat", body).then(function (r) {
+      if (r.status === 200) { waiting.className = "msg ai"; waiting.textContent = r.body.answer; $("chat-input").value = ""; return; }
+      waiting.remove();
+      if (r.status === 401) { showLogin(); return; }
+      $("chat-error").textContent = (r.body && r.body.error) ||
+        (r.status === 429 ? "Bạn hỏi quá nhanh, đợi một chút." : "Trợ lý AI tạm thời không trả lời được.");
+    }).catch(function () {
+      waiting.remove();
+      $("chat-error").textContent = "Mất kết nối tới máy chủ.";
+    }).then(function () { $("chat-send").disabled = false; });
+  });
+
   $("logout").addEventListener("click", function () { api("/api/logout", { method: "POST" }).then(showLogin); });
+  // O PIN chi nhan chu so: bo moi ky tu khac ngay luc go / dan (go nham chu khi mo khoa bi tinh la 1 lan sai).
+  // \D khong co co u -> chi giu so ASCII 0-9 (so toan goc / so A Rap cung bi bo, khop kiem tra o may chu).
+  Array.prototype.forEach.call(document.querySelectorAll("input[data-digits]"), function (box) {
+    box.addEventListener("input", function () {
+      var clean = box.value.replace(/\D/g, "").slice(0, 6);
+      if (clean !== box.value) box.value = clean;
+    });
+  });
   $("filter").addEventListener("change", function () { if (lastData) render(lastData); });
+  $("incidents-more").addEventListener("click", function () {
+    incidentsExpanded = !incidentsExpanded;
+    if (lastData) render(lastData);
+    if (!incidentsExpanded) $("incidents").closest(".card").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
   start();
 })();

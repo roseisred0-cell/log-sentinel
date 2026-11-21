@@ -8,7 +8,24 @@ APP_DIR=/opt/logsentinel/app
 DEPLOY="$APP_DIR/deploy"
 ENV_DIR=/etc/logsentinel
 
-dnf install -y nginx python3-pip amazon-cloudwatch-agent openssl
+# Amazon Linux 2023 khoa kho goi theo phien ban cua AMI: theo "latest" de nhan ban va moi (kiem tra:
+# dnf check-update --security). Lan dau van dung kho cua AMI cho toi khi doi xong bien nay.
+echo latest > /etc/dnf/vars/releasever
+dnf install -y nginx python3-pip amazon-cloudwatch-agent openssl dnf-automatic
+
+# Tu cai ban va BAO MAT moi ngay (khong nang cap tinh nang). Kernel moi co hieu luc sau lan khoi dong ke tiep
+# (may duoc Stop/Start hang ngay).
+cat > /etc/dnf/automatic.conf <<'DNF'
+[commands]
+upgrade_type = security
+download_updates = yes
+apply_updates = yes
+random_sleep = 600
+
+[emitters]
+emit_via = stdio
+DNF
+systemctl enable --now dnf-automatic.timer
 
 id webapp >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin webapp
 
@@ -49,6 +66,10 @@ TRUST_PROXY=true
 APP_LOG_PATH=/var/log/webapp/access.log
 COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID:-}
 COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID:-}
+GOVERNANCE_FUNCTION=${GOVERNANCE_FUNCTION:-}
+CHAT_MODEL=${CHAT_MODEL:-}
+CHAT_SECRET_ID=${CHAT_SECRET_ID:-}
+CHAT_DAILY_LIMIT=${CHAT_DAILY_LIMIT:-}
 RT
 chown root:webapp "$ENV_DIR"/*.env
 chmod 0640 "$ENV_DIR"/*.env

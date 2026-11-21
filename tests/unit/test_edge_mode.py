@@ -229,10 +229,11 @@ def test_budget_amount_is_configurable():
 
 
 # ------------------------------------------- thu hoi phien (quyen IAM)
-def test_vm_may_only_write_session_revocation_items(main):
+def test_vm_may_write_session_revocation_items_and_every_put_is_key_scoped(main):
+    # Danh sach khoa day du (REVOKED_SESSION#, ADMIN_PIN#, ROLE_REQ#): test_stack_hardening.py
     puts = [st for st in _statements(main, "TargetVmRole") if "dynamodb:PutItem" in _actions(st)]
-    assert len(puts) == 1
-    assert puts[0]["Condition"] == {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["REVOKED_SESSION#*"]}}
+    prefixes = [p for st in puts for p in st["Condition"]["ForAllValues:StringLike"]["dynamodb:LeadingKeys"]]
+    assert "REVOKED_SESSION#*" in prefixes and all(p.endswith("#*") for p in prefixes)
 
 
 # =====================================================================

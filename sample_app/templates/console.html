@@ -157,6 +157,29 @@
         <div class="tile"><span class="num" id="t-blocked">–</span><span class="lbl">IP đang bị khóa</span></div>
       </section>
 
+      <section id="stats-card" class="card">
+        <div class="card-head">
+          <h2>Thống kê sự cố</h2>
+          <div class="seg" id="stats-range" role="group" aria-label="Khoảng thời gian">
+            <button type="button" data-range="24h" aria-pressed="true">24 giờ</button>
+            <button type="button" data-range="7d" aria-pressed="false">7 ngày</button>
+            <button type="button" data-range="30d" aria-pressed="false">30 ngày</button>
+          </div>
+        </div>
+        <p class="muted" id="stats-note">Đang tải…</p>
+        <div class="viz-head">
+          <h3 class="viz-title">Số sự cố theo mức độ</h3>
+          <div class="legend" id="stats-legend"></div>
+        </div>
+        <div id="stats-hourly" class="viz"></div>
+        <h3 class="viz-title">Ma trận luật × thời gian</h3>
+        <div id="stats-matrix" class="viz"></div>
+        <details class="viz-table">
+          <summary>Xem dạng bảng</summary>
+          <table id="stats-table"></table>
+        </details>
+      </section>
+
       <section class="card">
         <div class="card-head">
           <h2>IP đang bị khóa</h2>
@@ -183,23 +206,92 @@
           <tbody id="incidents"></tbody>
         </table>
         <p class="empty" id="incidents-empty" hidden>Chưa có sự cố nào.</p>
+        <button type="button" id="incidents-more" class="small more" aria-controls="incidents" hidden></button>
+      </section>
+
+      <section id="chat-card" class="card" hidden>
+        <div class="card-head">
+          <h2>Trợ lý AI</h2>
+          <span class="muted">Chỉ đọc · không tự gỡ khóa hay đổi quyền</span>
+        </div>
+        <p class="muted">Đang hỏi về: <b id="chat-context">các sự cố gần đây</b>
+          <button type="button" id="chat-clear" class="small" hidden>Bỏ chọn</button></p>
+        <div id="chat-log" class="chat-log" aria-live="polite"></div>
+        <form id="chat-form" autocomplete="off">
+          <textarea id="chat-input" maxlength="1000" rows="2" required
+                    placeholder="Ví dụ: Sự cố này là gì, có nguy hiểm không, cần khắc phục thế nào?"></textarea>
+          <button type="submit" id="chat-send">Hỏi</button>
+          <p id="chat-error" class="error" role="alert"></p>
+        </form>
+        <p class="muted">Dữ liệu sự cố (đã che email) được gửi tới OpenAI để phân tích. Câu trả lời do AI tạo, có thể sai: hãy đối chiếu trước khi làm theo.</p>
       </section>
     </div>
 
-    <section id="users-card" class="card" hidden>
-      <div class="card-head"><h2>Người dùng</h2><span class="muted">Chỉ quản trị viên thấy mục này</span></div>
-      <h3>Chờ duyệt</h3>
-      <table><tbody id="users-pending"></tbody></table>
-      <p class="empty" id="users-pending-empty" hidden>Không có ai đang chờ duyệt.</p>
-      <h3>Được xem dữ liệu</h3>
-      <table><tbody id="users-viewers"></tbody></table>
-      <p class="empty" id="users-viewers-empty" hidden>Chưa có người dùng nào được duyệt.</p>
-      <p class="muted" id="users-admins"></p>
+    <section id="mfa-required-notice" class="card notice danger" hidden>
+      <h2>Quản trị viên bắt buộc bật 2FA</h2>
+      <p class="muted">Tài khoản của bạn có quyền Quản trị nhưng chưa bật xác thực 2 lớp. Hãy bật 2FA ở mục
+        <b>Tài khoản &amp; bảo mật</b> bên dưới; sau đó bạn sẽ thấy dữ liệu và mục Phân quyền.</p>
+    </section>
+
+    <section id="gov-card" class="card" hidden>
+      <div class="card-head"><h2>Phân quyền</h2><span class="muted" id="gov-timer">Chỉ quản trị viên thấy mục này</span></div>
+      <p id="gov-min-warning" class="error" hidden></p>
+      <p id="gov-bootstrap" class="muted" hidden></p>
+      <p id="gov-pending-hint" class="pending-hint" role="status" hidden></p>
+
+      <!-- Lần đầu: tự đặt PIN -->
+      <div id="gov-setpin" hidden>
+        <p>Mục này cần <b>mã PIN riêng 6 số</b>, khác mật khẩu đăng nhập. Hãy đặt PIN cho tài khoản của bạn.
+          Không dùng các mã dễ đoán như 123456, 000000, 121212.</p>
+        <form id="gov-setpin-form" autocomplete="off">
+          <label>PIN mới <input name="pin" type="password" inputmode="numeric" data-digits pattern="[0-9]{6}" maxlength="6" required autocomplete="new-password"></label>
+          <label>Nhập lại PIN <input name="pin2" type="password" inputmode="numeric" data-digits pattern="[0-9]{6}" maxlength="6" required autocomplete="new-password"></label>
+          <button type="submit">Đặt PIN</button>
+        </form>
+      </div>
+
+      <!-- Đã có PIN, mục đang khóa -->
+      <div id="gov-unlock" hidden>
+        <p>Nhập PIN để mở mục Phân quyền trong 10 phút. Sai 5 lần, PIN bị khóa 15 phút và các quản trị viên khác được cảnh báo.</p>
+        <form id="gov-unlock-form" autocomplete="off">
+          <label>PIN <input name="pin" type="password" inputmode="numeric" data-digits pattern="[0-9]{6}" maxlength="6" required autocomplete="off"></label>
+          <button type="submit">Mở khóa</button>
+        </form>
+      </div>
+
+      <!-- Đã mở khóa -->
+      <div id="gov-open" hidden>
+        <label class="inline">PIN xác nhận cho mỗi thao tác
+          <input id="gov-pin" type="password" inputmode="numeric" data-digits pattern="[0-9]{6}" maxlength="6" autocomplete="off">
+        </label>
+
+        <h3>Yêu cầu chờ duyệt</h3>
+        <table>
+          <thead><tr><th>Thao tác</th><th>Đối tượng</th><th>Người đề xuất</th><th>Phiếu</th><th>Hết hạn</th><th></th></tr></thead>
+          <tbody id="gov-requests"></tbody>
+        </table>
+        <p class="empty" id="gov-requests-empty" hidden>Không có yêu cầu nào đang chờ.</p>
+
+        <h3>Chờ duyệt</h3>
+        <table><tbody id="users-pending"></tbody></table>
+        <p class="empty" id="users-pending-empty" hidden>Không có ai đang chờ duyệt.</p>
+        <h3>Người xem</h3>
+        <table><tbody id="users-viewers"></tbody></table>
+        <p class="empty" id="users-viewers-empty" hidden>Chưa có người dùng nào được duyệt.</p>
+        <h3>Quản trị viên</h3>
+        <table><tbody id="users-admins"></tbody></table>
+        <p class="empty" id="users-admins-empty" hidden>Chưa có quản trị viên nào.</p>
+      </div>
+      <p id="gov-error" class="error" role="alert"></p>
+      <p id="gov-ok" class="ok" role="status"></p>
     </section>
     <p id="app-error" class="error" role="alert"></p>
   </main>
 
   <script src="/static/password-strength.js"></script>
+  <script src="/static/incident-text.js"></script>
+  <script src="/static/incident-charts.js"></script>
+  <div id="viz-tip" class="viz-tip" role="tooltip" hidden></div>
   <script src="/static/console.js"></script>
 </body>
 </html>

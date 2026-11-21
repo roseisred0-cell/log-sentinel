@@ -19,22 +19,43 @@
 
 1. Mở `/console` → tab **Đăng ký** → nhập email và mật khẩu. Thanh **Độ mạnh** hiện năm mức: *Rất yếu, Yếu, Trung bình, Mạnh, Rất mạnh*. Hệ thống chỉ chấp nhận từ **Trung bình** trở lên; hãy đạt **Mạnh** nếu được (từ 12 ký tự, có chữ hoa, chữ thường, số, ký tự đặc biệt, không chứa tên email, không là mật khẩu phổ biến).
 2. Cognito gửi mã 6 số tới email. Nhập mã ở bước **Xác nhận email**.
-3. Đăng nhập. Tài khoản mới ở trạng thái **Chờ duyệt**: chưa xem được sự cố. Quản trị viên vào mục **Người dùng → Chờ duyệt → Duyệt**. Lần đăng nhập kế tiếp bạn sẽ thấy dữ liệu (tối đa 30 phút sau khi được duyệt nếu đang đăng nhập sẵn).
+3. Đăng nhập. Tài khoản mới ở trạng thái **Chờ duyệt**: chưa xem được sự cố. Quản trị viên vào mục **Phân quyền → Chờ duyệt → Duyệt**. Lần đăng nhập kế tiếp bạn sẽ thấy dữ liệu (tối đa 30 phút sau khi được duyệt nếu đang đăng nhập sẵn).
 
 | Vai trò | Quyền |
 |---|---|
 | Chờ duyệt | Chỉ thấy trang **Tài khoản** (bật/tắt 2FA) |
 | Người xem | Xem sự cố và IP bị khóa |
-| Quản trị | Như người xem + gỡ khóa IP + duyệt/thu hồi người dùng |
+| Quản trị | Như người xem + gỡ khóa IP + mục **Phân quyền** (duyệt/thu hồi Người xem, đề xuất và bỏ phiếu nâng/hạ Quản trị, vô hiệu hóa tài khoản, đặt lại PIN). **Bắt buộc 2FA** |
 
-**Bật / tắt 2FA:** bấm **Tài khoản** → **Bật 2FA** → quét QR bằng Google/Microsoft Authenticator (hoặc nhập khóa thủ công) → nhập mã 6 số. Từ lần đăng nhập sau, hệ thống hỏi thêm mã OTP. Muốn tắt thì bấm **Tắt 2FA** ở cùng chỗ; hệ thống hỏi lại **mật khẩu và mã OTP hiện tại** (để người nhặt được máy đang đăng nhập không tự tắt được lớp bảo vệ của bạn). 2FA là **tùy chọn** với tài khoản đăng ký; tài khoản nội bộ `admin` luôn bắt buộc 2FA.
+**Bật / tắt 2FA:** bấm **Tài khoản** → **Bật 2FA** → quét QR bằng Google/Microsoft Authenticator (hoặc nhập khóa thủ công) → nhập mã 6 số. Từ lần đăng nhập sau, hệ thống hỏi thêm mã OTP. Muốn tắt thì bấm **Tắt 2FA** ở cùng chỗ; hệ thống hỏi lại **mật khẩu và mã OTP hiện tại** (để người nhặt được máy đang đăng nhập không tự tắt được lớp bảo vệ của bạn). 2FA là **tùy chọn** với Người xem; **bắt buộc** với Quản trị viên (chưa bật thì chỉ thấy màn hình bật 2FA, và không có nút tắt) và với tài khoản nội bộ `admin`.
 
 **Quên mật khẩu:** ở màn hình đăng nhập bấm **Quên mật khẩu?** → nhập email → nhập mã 6 số nhận qua email và mật khẩu mới (cùng thanh độ mạnh, tối thiểu *Trung bình*). Hệ thống luôn báo "nếu email đã đăng ký thì mã đã được gửi", dù email có tồn tại hay không. Nhập sai mã nhiều lần hoặc yêu cầu liên tục sẽ bị chặn tạm thời.
 
-**Quản trị viên đầu tiên:** tài khoản nội bộ `admin` (mật khẩu + OTP lấy qua SSM, xem phần trên) duyệt được người xem. Muốn một tài khoản Cognito thành **Quản trị** thì làm bằng AWS CLI (web app cố ý không cho tự nâng quyền admin):
+## Mục Phân quyền (dành cho quản trị viên)
 
-```bash
-aws cognito-idp admin-add-user-to-group --user-pool-id <UserPoolId> --username <email> --group-name soc-admins
+**Mã PIN riêng.** Lần đầu vào mục **Phân quyền**, bạn tự đặt một PIN 6 số, khác mật khẩu đăng nhập. Không dùng mã dễ đoán như `123456`, `000000`, `121212`, `112233`. Nhập PIN đúng thì mục mở trong **10 phút**; hết giờ hoặc đăng xuất phải nhập lại. Sai **5 lần** thì PIN bị khóa **15 phút**, và các quản trị viên khác nhận cảnh báo.
+
+**Thao tác cần nhiều người đồng ý.** Mỗi lần bấm, bạn nhập PIN vào ô *PIN xác nhận*:
+
+| Thao tác | Ai làm | Cần bao nhiêu người đồng ý |
+|---|---|---|
+| Duyệt người mới thành Người xem, thu hồi Người xem | Một quản trị viên | Không cần |
+| Nâng Người xem lên Quản trị, hạ Quản trị xuống Người xem | Một quản trị viên đề xuất | **Đa số** quản trị viên, tối thiểu 2 (2 admin cần 2, 3 cần 2, 4 cần 3). Người bị hạ không được bỏ phiếu |
+| Vô hiệu hóa tài khoản | Một quản trị viên đề xuất | 2 người (người đề xuất và một quản trị viên khác) |
+
+- Người đề xuất tính là một phiếu. Các quản trị viên khác nhận email/Telegram và vào bảng **Yêu cầu chờ duyệt** để bấm **Đồng ý** hoặc **Từ chối**. Một phiếu từ chối hủy yêu cầu ngay. Yêu cầu hết hạn sau **24 giờ**.
+- Hệ thống **luôn giữ tối thiểu 2 quản trị viên**: không hạ hay vô hiệu hóa được nếu sẽ còn dưới 2. Khi đang dưới 2, mục Phân quyền hiện cảnh báo đỏ. Không ai tự hạ quyền hay tự vô hiệu hóa chính mình được.
+- Khi thao tác có hiệu lực, người bị tác động bị đăng xuất khỏi mọi phiên và phải đăng nhập lại để nhận vai trò mới. Người vừa được nâng lên Quản trị sẽ phải bật 2FA trước khi làm việc.
+
+**Quên PIN.** Nhờ một quản trị viên khác bấm **Đặt lại PIN** cạnh tên bạn (người đó nhập PIN của chính họ). Lần vào sau bạn tự đặt PIN mới. Mỗi lần đặt lại đều có cảnh báo.
+
+**Quản trị viên đầu tiên (chế độ khởi tạo).** Khi hệ thống chưa có đủ 2 quản trị viên Cognito, tài khoản nội bộ `admin` (mật khẩu + OTP lấy qua SSM, xem phần trên) cũng phải đặt PIN, và được **tự mình** nâng một Người xem lên Quản trị. Cách làm: cho 2 người đăng ký, duyệt họ thành Người xem, rồi bấm **Đề xuất lên Quản trị** cho từng người. Khi đã đủ 2 quản trị viên Cognito, `admin` nội bộ chỉ còn xem và gỡ khóa IP (không duyệt hay thu hồi Người xem nữa).
+
+**Quên PIN của `admin` nội bộ:** xóa bằng AWS CLI, rồi đặt PIN mới ở lần vào sau:
+
+```powershell
+aws dynamodb delete-item --region ap-southeast-1 --table-name <IncidentTable> `
+  --key '{"incident_id":{"S":"ADMIN_PIN#local:admin"},"timestamp":{"S":"PIN"}}'
 ```
 
 ## Truy vấn log bằng Athena (cho người làm báo cáo và điều tra)
@@ -62,6 +83,23 @@ Lưu ý: mỗi truy vấn bị giới hạn 1 GB dữ liệu quét (khoảng 0,0
 - **Bảng "Sự cố gần đây":** 50 sự cố mới nhất, lọc được theo mức độ. Trang tự làm mới mỗi 15 giây.
 - Phiên đăng nhập hết hạn sau 30 phút. Xong việc thì bấm **Đăng xuất**: phiên bị thu hồi ngay trên máy chủ, nên dù ai đó đã sao chép cookie của bạn cũng không dùng lại được.
 
+## Trợ lý AI (khi được bật)
+
+Thẻ **Trợ lý AI** nằm dưới bảng sự cố, dùng được cho cả Quản trị và Người xem.
+
+- Bấm **Hỏi AI** ở một dòng sự cố để hỏi riêng về sự cố đó (ví dụ: "Sự cố này là gì, có nguy hiểm không, khắc phục thế nào?"). Bấm **Bỏ chọn** để hỏi chung về các sự cố gần đây hoặc cách dùng hệ thống.
+- Trợ lý **chỉ đọc**: không tự gỡ khóa IP, không đổi quyền. Khi cần thao tác, nó hướng dẫn bạn tự bấm nút.
+- Mỗi người hỏi tối đa 30 câu mỗi ngày (quản trị có thể đổi khi deploy). Mỗi câu hỏi tối đa 1.000 ký tự, mỗi lần chỉ một câu đang chờ.
+- Dữ liệu sự cố được rút gọn và **che email** trước khi gửi tới OpenAI. Câu trả lời do AI tạo, có thể sai: đối chiếu trước khi làm theo.
+
+Người triển khai bật trợ lý bằng `cdk deploy -c chat_model=<tên model OpenAI>`, rồi tự đặt API key (không gửi key cho ai, không dán vào chat):
+
+```
+aws secretsmanager put-secret-value --region ap-southeast-1 --secret-id logsentinel/openai_api_key --secret-string "<API key>"
+```
+
+Key có hiệu lực từ câu hỏi kế tiếp, không cần khởi động lại máy. Nên đặt hạn mức chi tiêu tháng trên platform.openai.com.
+
 ## Ý nghĩa các luật
 
 | Luật | Nghĩa là | Nên làm gì |
@@ -82,6 +120,11 @@ Lưu ý: mỗi truy vấn bị giới hạn 1 GB dữ liệu quét (khoảng 0,0
 | `IAM_POLICY_VERSION_CREATED` / `IAM_TRUST_POLICY_CHANGED` | Sửa nội dung policy đang dùng, hoặc cho phép bên ngoài mượn quyền của một role | Xem ai làm; khôi phục phiên bản policy / trust policy cũ |
 | `IAM_LOGIN_PROFILE_CHANGED` / `IAM_USER_ADDED_TO_GROUP` | Đặt mật khẩu Console cho user khác, hoặc thêm user vào nhóm | Dấu hiệu cài cửa hậu. Nếu không phải mình: đặt lại mật khẩu, gỡ khỏi nhóm |
 | `KMS_KEY_TAMPERING` | Có người vô hiệu hóa hoặc hẹn xóa khóa mã hóa | **Khẩn cấp**: hủy lịch xóa khóa (`aws kms cancel-key-deletion`), bật lại khóa. Mất khóa là mất toàn bộ log và bảng sự cố |
+| `ROLE_REQUEST_CREATED` | Một quản trị viên đề xuất nâng/hạ Quản trị hoặc vô hiệu hóa tài khoản | Vào mục **Phân quyền** bỏ phiếu. Nếu không ai trong nhóm đề xuất: **Từ chối** ngay, đổi mật khẩu người đề xuất |
+| `ADMIN_ROLE_CHANGED` / `USER_DISABLED` | Thao tác đã đủ phiếu và có hiệu lực (`bootstrap: true` = admin nội bộ tự nâng quyền lúc khởi tạo) | Đối chiếu với kế hoạch của nhóm |
+| `ROLE_CHANGE_FAILED` | Đủ phiếu nhưng Cognito lỗi nên chưa thực hiện | Đợi vài phút rồi bấm **Đồng ý** lại trên yêu cầu đó |
+| `ADMIN_PIN_LOCKED` | Có người nhập sai PIN mục Phân quyền 5 lần | Hỏi chủ tài khoản. Nếu không phải họ: phiên đăng nhập của họ có thể đã bị chiếm, đổi mật khẩu |
+| `ADMIN_PIN_RESET` | Một quản trị viên đặt lại PIN của người khác | Xác nhận người được đặt lại có yêu cầu việc này |
 
 Chi tiết sự cố IAM có trường `via_service: cloudformation.amazonaws.com` nghĩa là thay đổi đến từ một lần `cdk deploy` — thường là của chính bạn, nhưng vẫn nên đối chiếu thời gian.
 

@@ -29,7 +29,7 @@ th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; t
 th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
 tr:last-child td { border-bottom: 0; }
 td.mono, code { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
-td.details { max-width: 340px; color: var(--muted); word-break: break-word; }
+td.details { min-width: 260px; max-width: 380px; color: var(--muted); overflow-wrap: anywhere; }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid currentColor; }
 .badge.CRITICAL { color: var(--crit); } .badge.HIGH { color: var(--high); }
 label { display: block; margin: 12px 0 0; font-size: 13px; color: var(--muted); }
@@ -74,3 +74,80 @@ form button + button { margin-left: 8px; }
 
 button.link { margin: 12px 0 0 12px; padding: 0; background: transparent; color: var(--accent); font-weight: 500; text-decoration: underline; }
 #mfa-disable { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.notice.danger { border-left-color: var(--crit); }
+label.inline { display: flex; align-items: center; gap: 10px; margin: 8px 0 4px; }
+label.inline input { width: 9em; }
+td button.small + button.small { margin-left: 6px; }
+#gov-min-warning { font-weight: 600; }
+td.details details { margin-top: 4px; }
+td.details summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+td.details pre { margin: 4px 0 0; max-width: 520px; max-height: 240px; overflow: auto; white-space: pre-wrap;
+  word-break: break-all; font-size: 12px; background: var(--bg, transparent); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 8px; }
+
+/* Tro ly AI */
+.chat-log { max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.chat-log:empty { display: none; }
+.msg { margin: 0; padding: 8px 12px; border-radius: 9px; white-space: pre-wrap; word-break: break-word; max-width: 85%; }
+.msg.user { align-self: flex-end; background: var(--accent); color: #fff; }
+.msg.ai { align-self: flex-start; background: var(--bg); border: 1px solid var(--line); }
+textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg);
+           color: var(--ink); font: inherit; resize: vertical; }
+
+/* Thong ke su co. Mau da kiem tra bang validate_palette.js tren nen the sang #fff / toi #1b2029:
+   - cot: mau trang thai co dinh (critical #d03b3b, serious #ec835a) + xam cho muc khac; luon kem chu thich chu
+   - ma tran: mot sac ho phach --ordinal (nhat = it, dam = nhieu), khac sac do/cam cua cot de khong nham la CRITICAL */
+:root { --sev-critical: #d03b3b; --sev-high: #ec835a; --sev-other: #9aa3ae;
+        --heat-1: #e0a030; --heat-2: #c98500; --heat-3: #a86c00; --heat-4: #845200; --heat-5: #5e3a00;
+        --heat-ink-1: #1c2330; --heat-ink-2: #1c2330; --heat-ink-3: #fff; --heat-ink-4: #fff; --heat-ink-5: #fff; }
+@media (prefers-color-scheme: dark) {
+  :root { --sev-other: #6b7482;
+          --heat-1: #7d5000; --heat-2: #9c6800; --heat-3: #bd8200; --heat-4: #dea023; --heat-5: #f6c868;
+          --heat-ink-1: #fff; --heat-ink-2: #fff; --heat-ink-3: #1c2330; --heat-ink-4: #1c2330; --heat-ink-5: #1c2330; }
+}
+.viz-title { font-size: 13px; font-weight: 600; color: var(--muted); margin: 14px 0 6px; }
+.viz { width: 100%; }
+.viz-svg { width: 100%; height: auto; display: block; }
+.viz-bar.sev-critical { fill: var(--sev-critical); } .viz-bar.sev-high { fill: var(--sev-high); }
+.viz-bar.sev-other { fill: var(--sev-other); }
+.viz-axis { stroke: var(--line); stroke-width: 1; }
+.viz-grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 3 3; }
+.viz-tick { fill: var(--muted); font-size: 11px; }
+.viz-value { fill: var(--ink); font-size: 11px; font-weight: 600; }
+.viz-hit { fill: transparent; }
+.viz-hit:hover { fill: var(--line); fill-opacity: .35; }
+.heat { display: grid; gap: 2px; align-items: center; font-size: 12px; min-width: 520px; }
+.heat-head { color: var(--muted); font-size: 11px; }
+.heat-hour { text-align: left; white-space: nowrap; overflow: visible; }
+.heat-rule { font-family: ui-monospace, Consolas, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 8px; }
+.heat-total { text-align: right; font-variant-numeric: tabular-nums; }
+.heat-cell { display: block; height: 22px; border-radius: 3px; font-size: 10px; line-height: 22px;
+             text-align: center; font-variant-numeric: tabular-nums; overflow: hidden; }
+.heat-cell.c0 { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+.heat-cell.c1 { background: var(--heat-1); color: var(--heat-ink-1); } .heat-cell.c2 { background: var(--heat-2); color: var(--heat-ink-2); }
+.heat-cell.c3 { background: var(--heat-3); color: var(--heat-ink-3); } .heat-cell.c4 { background: var(--heat-4); color: var(--heat-ink-4); }
+.heat-cell.c5 { background: var(--heat-5); color: var(--heat-ink-5); }
+.heat-legend { display: flex; align-items: center; gap: 4px; margin-top: 8px; color: var(--muted); font-size: 12px; flex-wrap: wrap; }
+.heat-legend .heat-cell { width: 16px; height: 12px; }
+.viz-table { margin-top: 12px; font-size: 13px; }
+.viz-table summary { cursor: pointer; color: var(--accent); }
+.viz-tip { position: fixed; z-index: 10; pointer-events: none; background: var(--ink); color: var(--card); padding: 5px 9px;
+           border-radius: 6px; font-size: 12px; white-space: nowrap; }
+.heat-legend .heat-cell { font-size: 0; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg button { margin: 0; border: 0; border-radius: 0; background: transparent; color: var(--ink); padding: 4px 12px; font-weight: 500; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--card); }  /* chu dam tren nen sang o che do toi */
+.viz-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.legend-swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.legend-swatch.sev-critical { background: var(--sev-critical); } .legend-swatch.sev-high { background: var(--sev-high); }
+.legend-swatch.sev-other { background: var(--sev-other); }
+#stats-note { margin: 0 0 4px; }
+
+/* Nut Xem them / Thu gon cua bang Su co gan day */
+button.more { display: block; margin: 12px auto 0; }
+button.ask-ai { margin-top: 6px; }
+/* Nhac so tai khoan cho duyet khi muc Phan quyen dang khoa */
+.pending-hint { margin: 8px 0; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--bg); border-radius: 4px; }

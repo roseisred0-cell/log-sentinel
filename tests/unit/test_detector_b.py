@@ -199,10 +199,11 @@ def test_telegram_message_is_laid_out_for_a_phone_screen(det):
     lines = body["text"].split("\n")
     assert body["parse_mode"] == "HTML"
     assert "<b>CRITICAL</b>" in lines[0] and "<b>SQL_INJECTION</b>" in lines[0]
-    assert "2026-11-11 08:30:00 UTC" in body["text"]
+    assert "Thời gian: 15:30:00 11/11/2026 (giờ VN)" in body["text"]     # 08:30 UTC = 15:30 gio Viet Nam
     assert "IP: <code>203.0.113.5</code>" in body["text"]
-    assert "payload: <code>1 OR 1=1</code>" in body["text"]
-    assert "<code>inc-42</code>" in lines[-1]
+    assert "Tài khoản: <code>admin</code>" in body["text"]
+    assert "Dữ liệu tấn công: <code>1 OR 1=1</code>" in body["text"]
+    assert lines[-1] == "Mã sự cố: <code>inc-42</code>"
     assert "{" not in body["text"]            # khong con do JSON tho vao tin nhan
 
 
@@ -237,7 +238,25 @@ def test_huge_or_many_fields_still_produce_a_valid_message_within_the_limit(det)
     assert len(text) <= det.TELEGRAM_MAX_CHARS
     assert text.count("<code>") == text.count("</code>")
     assert not re.search(r"&(?!amp;|lt;|gt;)", text)          # khong co thuc the bi cat ngang
-    assert "(+32 truong khac" in text and "IP: <code>203.0.113.5</code>" in text
+    assert "(+32 trường khác" in text and "IP: <code>203.0.113.5</code>" in text
+
+
+def test_known_technical_fields_get_vietnamese_names_and_unknown_ones_keep_their_key(det):
+    text = _send(det, {"client_ip": "203.0.113.5", "status_code": 401, "attempt_count": 5,
+                       "window_seconds": 60, "via_service": "cloudformation.amazonaws.com", "la_la": "x"},
+                 rule="BRUTE_FORCE_DETECTED")["text"]
+    for line in ("Mã HTTP: <code>401</code>", "Số lần thử: <code>5</code>", "Trong khoảng (giây): <code>60</code>",
+                 "Qua dịch vụ: <code>cloudformation.amazonaws.com</code>", "la_la: <code>x</code>"):
+        assert line in text
+
+
+def test_email_alert_is_vietnamese_with_diacritics_and_keeps_the_raw_json(det):
+    msg = det._render_alert("HIGH", "BRUTE_FORCE_DETECTED", {"client_ip": "203.0.113.5"}, "inc-9",
+                            "2026-11-11T08:30:00+00:00")
+    assert msg.splitlines() == ["[LogSentinel HIGH] BRUTE_FORCE_DETECTED",
+                                "Thời gian: 15:30:00 11/11/2026 (giờ VN) · 2026-11-11T08:30:00+00:00",
+                                'Chi tiết: {"client_ip": "203.0.113.5"}',
+                                "Mã sự cố: inc-9"]
 
 
 def test_non_dict_details_and_odd_timestamp_do_not_break_the_alert(det):

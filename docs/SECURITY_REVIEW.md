@@ -63,7 +63,7 @@ Hôm nay là 10/11. Mọi ô Trạng thái trong sheet đều đang là "Chưa l
 |---|---|---|
 | 1. App mẫu (API GW + Lambda) | Làm bằng **EC2 + Nginx + Gunicorn** | Sửa mô tả trong kế hoạch/báo cáo thành EC2. Lý do hợp lệ: SOAR cần một tầng biên để chặn IP |
 | 2. Quy ước log | Xong: `docs/LOG_CONVENTION.md` | Hai người cùng duyệt |
-| 3. CloudTrail/Firehose → S3, KMS | CloudTrail → S3 mã hóa CMK, file validation | **Chốt với mentor**: log app hiện không archive xuống S3. Nếu bắt buộc thì thêm subscription filter thứ 2 → Firehose → S3 (chi phí thấp) |
+| 3. CloudTrail → S3, KMS | CloudTrail → S3 mã hóa CMK, file validation | Log app không archive xuống S3 (đã gỡ Firehose 12/11: gói Free không dùng được, không phải lớp bảo vệ). Truy vấn log app trong 30 ngày bằng CloudWatch Logs Insights |
 | 4. Bơm log giả | Xong: `python attack_sim.py logs` | |
 | 5. Luật web + DynamoDB | Xong, có test | |
 | 6. Luật CloudTrail | Xong 6 nhóm luật, `iam_tamper.py` bắn đủ 6 | Sau khi deploy, kiểm tra 1 lần bằng sự kiện IAM thật (tạo access key cho 1 user test) để chứng minh multi-region hoạt động |
@@ -118,10 +118,10 @@ Con số ~$2.15/tháng trong handover đang bỏ sót mấy khoản:
 
 - **SOC Console** tại `/console`: đăng nhập mật khẩu + OTP, cookie phiên `Secure` / `HttpOnly` / `SameSite=Strict`, CSRF token cho thao tác ghi, CSP `default-src 'self'`, dữ liệu chèn bằng `textContent` (payload tấn công không thể chạy trong trình duyệt của quản trị viên).
 - **GSI `by_type`** để Console liệt kê sự cố bằng Query. EC2 chỉ được `DeleteItem` với khóa `BLOCKED_IP#*`, không xóa được bản ghi sự cố.
-- **Firehose → S3** cho log ứng dụng (Bước 3 của kế hoạch).
+- **Firehose → S3** cho log ứng dụng (Bước 3 của kế hoạch). *Đã gỡ ngày 12/11/2026.*
 - **Luật `ROOT_ACCOUNT_LOGIN`** (CRITICAL).
 - **Giới hạn concurrency cho Lambda**: tùy chọn, `-c detector_max_concurrency=5`. Mặc định tắt vì tài khoản mới thường không đủ quota để reserve.
-- Chi phí thêm: Firehose tính theo GB ingest (lượng log lab rất nhỏ), GSI tính theo lượt ghi/đọc on-demand.
+- Chi phí thêm: GSI tính theo lượt ghi/đọc on-demand.
 
 ## 6c. Bổ sung v2.4: tài khoản người dùng bằng Amazon Cognito
 
@@ -174,6 +174,38 @@ Giới hạn của chế độ edge cần biết:
 - WAF giới hạn tốc độ có độ trễ khoảng 30–60 giây và vẫn tính theo IP: botnet đủ lớn, mỗi IP dưới ngưỡng, vẫn đi qua. Đây là giảm thiểu, không phải miễn nhiễm.
 - IP bị khóa lên WAF chậm tối đa 1 phút; trong lúc đó web app tự chặn như cũ.
 
+## 6f. Bổ sung v2.7: phân quyền admin (`sample_app/admin_governance.py`, 12/11/2026)
+
+Thiết kế: nhật ký 11/11 mục 3 và nhật ký 12/11 mục 1, 4.A. Tóm tắt các lớp bảo vệ:
+
+- **Admin bắt buộc 2FA.** Admin Cognito chưa bật 2FA chỉ vào được màn hình bật 2FA; admin không tắt được 2FA.
+- **PIN riêng cho mục Phân quyền.** 6 số, chặn mã dễ đoán, băm scrypt (muối riêng), mở 10 phút. Sai 5 lần khóa 15 phút; bộ đếm nằm trong DynamoDB nên dùng chung mọi worker và không mất khi đăng nhập lại. Mỗi phiếu (đồng ý hoặc từ chối) đều phải nhập lại PIN.
+- **Bỏ phiếu.** Nâng hoặc hạ Quản trị cần đa số trên tất cả admin (tối thiểu 2 phiếu, người bị hạ không bỏ phiếu); vô hiệu hóa cần 2 người. Một phiếu từ chối hủy yêu cầu. Yêu cầu hết hạn sau 24 giờ. Danh sách người được bỏ phiếu lấy trực tiếp từ Cognito mỗi lần bỏ phiếu.
+- **Luôn tối thiểu 2 admin**, kiểm tra cả lúc tạo yêu cầu lẫn ngay trước khi thực thi. Việc thực thi đi qua một khóa dùng chung (`ROLE_REQ#LOCK#execute`), nên hai yêu cầu hạ quyền chạy song song không thể cùng thấy 3 admin.
+- **Chỉ đánh dấu "đã thực thi" sau khi Cognito thành công.** Cognito lỗi thì yêu cầu vẫn chờ và có cảnh báo `ROLE_CHANGE_FAILED`.
+- **Thay đổi có hiệu lực ngay.** Người bị nâng, hạ quyền hoặc vô hiệu hóa bị hủy mọi phiên (`REVOKED_SESSION#user:...`); worker khác biết trong tối đa 15 giây.
+- **Chế độ khởi tạo.** Khi chưa đủ 2 admin Cognito, `admin` nội bộ được bỏ phiếu và tự nâng một Người xem lên Quản trị. Khi đã đủ, tài khoản này chỉ còn xem và gỡ khóa IP.
+- **Lambda thực thi phân quyền** (`sample_app/governance_lambda.py`, nhật ký 12/11 mục 4.D1): chỉ Lambda này được ghi vào nhóm Cognito và vào `ROLE_REQ#`. Người gọi được xác định bằng token Cognito do Lambda tự hỏi Cognito (`GetUser`); mọi trường danh tính khác EC2 gửi đều bị bỏ qua. `admin` nội bộ (không có token) chỉ được tin trong chế độ khởi tạo; khi đã đủ 2 admin Cognito, tài khoản này không còn duyệt hay thu hồi Người xem. Lambda ghi dấu vết riêng vào `/logsentinel/governance` (EC2 không sửa được).
+- **Mọi thao tác đều có cảnh báo** HIGH qua email/Telegram (`ROLE_REQUEST_CREATED`, `ADMIN_ROLE_CHANGED`, `USER_DISABLED`, `ADMIN_PIN_LOCKED`, `ADMIN_PIN_RESET`, `ROLE_CHANGE_FAILED`), không bao giờ khóa IP.
+
+Giới hạn còn lại: xem mục 7 (máy web bị chiếm và phân quyền). Đặt lại PIN của `admin` nội bộ bằng AWS CLI không sinh cảnh báo (CloudTrail không ghi lệnh dữ liệu DynamoDB nếu chưa bật data events).
+
+## 6h. Bổ sung v2.9: trợ lý AI dùng OpenAI (`sample_app/chat_assistant.py`, 19/11/2026)
+
+Thay cho trợ lý Bedrock đã gỡ (tài khoản gói Free không gọi được model). Bật bằng `-c chat_model=<model>`; mặc định tắt.
+
+| Mối đe dọa | Biện pháp | Test |
+|---|---|---|
+| Lộ API key | Key nằm trong Secrets Manager `logsentinel/openai_api_key`, chỉ role EC2 đọc; chỉ ARN nằm trong UserData; trình duyệt chỉ gọi `/api/chat` của Console | `test_chat_stack.py` |
+| Prompt injection qua log (User-Agent, URL do kẻ tấn công viết) | Trợ lý không có công cụ hay quyền hành động nào; dữ liệu sự cố bọc trong `<du_lieu_log>`, ký tự `<` `>` bị thay để không đóng khối sớm; system prompt cấm làm theo chỉ dẫn trong dữ liệu | `test_chat_assistant.py` |
+| Lộ dữ liệu cá nhân ra bên thứ ba | Chỉ gửi sự cố người dùng vốn xem được; che email, cắt chuỗi 500 ký tự, tối đa 10 sự cố; `store=False` để OpenAI không lưu hội thoại; log không ghi nội dung câu hỏi | `test_chat_assistant.py`, `test_chat_route.py` |
+| Đốt tiền (Denial of Wallet) | Hạn mức mỗi người mỗi ngày (DynamoDB `CHAT_QUOTA#`, tăng có điều kiện); câu hỏi tối đa 1.000 ký tự; trả lời tối đa 800 token; Nginx 6 câu/phút/IP; hạn mức tháng trên OpenAI (người dùng tự đặt) | `test_chat_quota_store.py`, `test_chat_stack.py` |
+| Treo Console (mỗi câu giữ một luồng tới 25 giây) | Mỗi người một câu đang chờ; timeout OpenAI 25 giây, không thử lại; Nginx `proxy_read_timeout 30s` riêng cho `/api/chat` | `test_chat_assistant.py` |
+| XSS qua câu trả lời của AI | Hiển thị bằng `textContent`; CSP `default-src 'self'` | `test_chat_route.py` |
+| Lộ chi tiết lỗi nhà cung cấp | Lỗi OpenAI chỉ trả "tạm thời không trả lời được" (503); log máy chủ chỉ ghi tên loại lỗi | `test_chat_assistant.py` |
+
+Còn thiếu: luật Detector cảnh báo lạm dụng chatbot (`CHAT_ABUSE`); hội thoại chưa có trí nhớ (mỗi câu hỏi độc lập, đỡ một đường giả mạo lịch sử). Giới hạn "một câu đang chờ" tính trong từng tiến trình Gunicorn (2 tiến trình).
+
 ## 7. Rủi ro còn lại (ghi vào báo cáo để thể hiện tư duy)
 
 Ba mục đầu có test `xfail(strict)` ở nhóm G của bộ red-team: khi ai đó vá xong, test sẽ báo.
@@ -186,7 +218,10 @@ Ba mục đầu có test `xfail(strict)` ở nhóm G của bộ red-team: khi ai
 - **Console chạy chung máy với ứng dụng được bảo vệ** và chỉ có một máy, không có dự phòng.
 - Bộ lọc SQLi là danh sách mẫu (regex), không phải bộ phân tích cú pháp: payload mới chưa có trong danh sách vẫn có thể lọt. Đây là lớp phát hiện, không thay được truy vấn tham số hóa trong ứng dụng thật.
 
-- Role EC2 có quyền `AdminAddUserToGroup` / `AdminRemoveUserFromGroup` trên đúng user pool (để duyệt người dùng ngay trong Console). Vì Console chạy chung máy với app mục tiêu, kẻ chiếm được máy có thể tự duyệt tài khoản của mình lên *viewer* (đọc dữ liệu). Web app cố ý không cho nâng quyền admin; bản thương mại nên tách Console/duyệt người dùng ra dịch vụ riêng.
+- **Máy web bị chiếm và phân quyền** (đã giảm thiểu 12/11, mục 6f): EC2 không còn quyền ghi vào Cognito hay vào `ROLE_REQ#`. Mọi thay đổi đi qua Lambda `GovernanceExecutor`, Lambda tự xác minh người bấm bằng token Cognito. Rủi ro còn lại:
+  - Kẻ chiếm máy đúng lúc một admin đăng nhập lấy được token của admin đó (token nằm trong phiên trên máy), và bỏ phiếu thay người đó được trong thời hạn token (tối đa 1 giờ).
+  - Trong chế độ khởi tạo (dưới 2 admin Cognito), Lambda tin yêu cầu `{"local": true}`, nên kẻ chiếm máy lúc này tự nâng được một tài khoản lên Quản trị. Khoảng thời gian này chỉ có lúc mới dựng hệ thống.
+  - PIN kiểm tra trên EC2: kẻ chiếm máy bỏ qua được PIN (nhưng vẫn cần token như trên) và đặt lại được PIN của admin khác (`ADMIN_PIN#`).
 - Cognito dùng email mặc định (tối đa ~50 mã/ngày, gồm cả mã đăng ký và mã quên mật khẩu). Bản thương mại nên cấu hình SES.
 - Giới hạn tốc độ đăng ký/quên mật khẩu nằm trong RAM từng Gunicorn worker (thực tế ≈ 4 × giới hạn).
 - Access token Cognito nằm trong cookie phiên (đã ký, `HttpOnly`, `Secure`, nhưng không mã hóa).
@@ -195,7 +230,7 @@ Ba mục đầu có test `xfail(strict)` ở nhóm G của bộ red-team: khi ai
 - TOTP chưa chống replay trong cùng 30 giây.
 - Cache chặn nằm riêng trong từng Gunicorn worker. Một IP bị khóa ở worker A vẫn có thể lọt vào worker B trong tối đa 5 giây, cho tới khi Lambda ghi xong DynamoDB.
 - Luật root mới chỉ bắt lần đăng nhập Console; chưa bắt lời gọi API bằng access key của root.
-- SOC Console chạy chung máy với ứng dụng mục tiêu và chỉ có một tài khoản quản trị.
+- SOC Console chạy chung máy với ứng dụng mục tiêu.
 - SNS topic chưa mã hóa KMS.
 - `cdk.context.json` chứa VPC ID và Account ID thật. Che đi trước khi để repo public.
 
