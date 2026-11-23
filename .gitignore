@@ -11,3 +11,6 @@ cdk.out
 # bi mat / file sinh ra khi lab
 *.env
 setup.html
+
+# file tam cua draw.io
+*.bkp
