@@ -257,13 +257,13 @@ git commit -m "Console: nut Quay lai o buoc OTP va xac nhan email, nut Bat 2FA n
 **Files:**
 - Modify: `docs/SECURITY_REVIEW.md` mục 7 (rủi ro còn lại: câu hỏi bảo mật là yếu tố yếu, được bù bằng mật khẩu + 2FA; kẻ có cả mật khẩu + điện thoại vẫn lấy lại được PIN — PIN không chặn trường hợp đó)
 - Modify: `docs/USER_GUIDE.md` (cách đặt câu hỏi, cách lấy lại PIN)
-- Create: `docs/NHAT_KY_2026-11-21.md` (việc đã làm, số test, "có hiệu lực sau `cdk deploy`")
+- Modify: `docs/NHAT_KY.md` (thêm mục ngày làm: việc đã làm, số test, "có hiệu lực sau `cdk deploy`")
 
 - [ ] **Step 1: Viết tài liệu** như trên.
 - [ ] **Step 2: Chạy cả bộ test** — `.venv/Scripts/python -m pytest -q`, ghi số test vào nhật ký.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/SECURITY_REVIEW.md docs/USER_GUIDE.md docs/NHAT_KY_2026-11-21.md
+git add docs/SECURITY_REVIEW.md docs/USER_GUIDE.md docs/NHAT_KY.md
 git commit -m "Tai lieu: lay lai PIN bang cau hoi bao mat, nut Quay lai, Bat 2FA ngay"
 ```

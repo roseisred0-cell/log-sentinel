@@ -17,7 +17,9 @@ CloudTrail (multi-region, KMS) ─> S3 + /logsentinel/cloudtrail ─────
 
 | Tài liệu | Nội dung |
 |---|---|
-| `docs/SECURITY_REVIEW.md` | Lỗ hổng đã vá, đối chiếu kế hoạch, runbook GameDay, ghi chú FinOps |
+| `docs/PROPOSAL.md` | Tổng quan: bài toán, workflow 17 bước theo sơ đồ `docs/architecture/`, chi phí, tự đánh giá |
+| `docs/NHAT_KY.md` | Nhật ký theo ngày, quyết định thiết kế đã chốt, việc còn mở |
+| `docs/SECURITY_REVIEW.md` | Lỗ hổng đã vá, biện pháp bảo mật từng tính năng, rủi ro còn lại, hướng mở rộng |
 | `docs/USER_GUIDE.md` | Hướng dẫn cho khách hàng: SOC Console (`/console`), ý nghĩa từng luật |
 | `docs/LOG_CONVENTION.md` | Hợp đồng log giữa web app và Detector |
 | `docs/COST.md` | Chi phí ước tính theo tháng cho từng chế độ, và chi phí khi bị tấn công |
@@ -55,6 +57,14 @@ cdk deploy --all --require-approval never -c enable_edge=true \
     -c alert_email=<email> -c admin_cidr=<ip>/32 \
     -c console_cidrs=<dải-ip-văn-phòng>          # tùy chọn: chỉ dải này vào được Console
 ```
+
+Đang chạy thật ở chế độ edge, **luôn deploy kèm đủ cờ** (thiếu `enable_edge`/`static_ip` thì CDK xóa CloudFront và trả Elastic IP):
+
+```bash
+cdk deploy --all -c enable_edge=true -c static_ip=true -c alert_email=<email> -c admin_cidr=<ip>/32 -c chat_model=<model>
+```
+
+`-c static_ip=true`: Elastic IP, địa chỉ không đổi khi Stop/Start máy. `-c chat_model=<model OpenAI>`: bật trợ lý AI; sau deploy tự đặt key vào secret `logsentinel/openai_api_key` (`-c chat_daily_limit=30` câu/người/ngày).
 
 Tham số khác: `-c monthly_budget_usd=20` (cảnh báo chi phí tài khoản qua email, `0` để tắt), `-c detector_max_concurrency=5` (trần Lambda chạy song song, cần quota tài khoản ≥ 105).
 

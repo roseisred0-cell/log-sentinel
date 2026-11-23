@@ -1,6 +1,6 @@
 """Phan quyen admin (muc "Phan quyen" cua SOC Console): PIN rieng, bo phieu nang/ha/vo hieu hoa, che do khoi tao.
 
-Quyet dinh thiet ke: docs/NHAT_KY_2026-11-11.md muc 3 va docs/NHAT_KY_2026-11-12.md muc 1.
+Quyet dinh thiet ke: docs/NHAT_KY.md, muc "Phan quyen admin".
 Seam A: HTTP API cua web app (Cognito gia + store RAM).
 """
 import pytest
