@@ -22,6 +22,7 @@ Quy tac (docs/NHAT_KY.md, muc "Phan quyen admin"):
   - che do khoi tao (duoi 2 admin Cognito): admin noi bo duoc bo phieu va tu minh nang mot nguoi len Quan tri;
     du 2 admin Cognito thi admin noi bo mat quyen bo phieu.
 """
+import contextlib
 import hashlib
 import hmac
 import secrets
@@ -190,14 +191,16 @@ class MemoryGovernanceStore:
         return True
 
     # khoa thuc thi dung chung moi worker
-    def lock_acquire(self, name: str, now: float, lease_seconds: float) -> bool:
-        if self.locks.get(name, 0) > now:
+    def lock_acquire(self, name: str, now: float, lease_seconds: float, owner: str) -> bool:
+        if self.locks.get(name, (0, ""))[0] > now:
             return False
-        self.locks[name] = now + lease_seconds
+        self.locks[name] = (now + lease_seconds, owner)
         return True
 
-    def lock_release(self, name: str) -> None:
-        self.locks[name] = 0
+    def lock_release(self, name: str, owner: str) -> None:
+        """Chi chu khoa moi nha duoc: worker cham qua han khong mo khoa cua worker da lay lai khoa sau no."""
+        if self.locks.get(name, (0, ""))[1] == owner:
+            self.locks[name] = (0, "")
 
     def pin_fail(self, principal: str) -> int:
         rec = self.pins[principal]
@@ -308,15 +311,21 @@ class DynamoGovernanceStore:
     def _lock_key(self, name: str) -> dict:
         return {"incident_id": f"ROLE_REQ#LOCK#{name}", "timestamp": "LOCK"}
 
-    def lock_acquire(self, name: str, now: float, lease_seconds: float) -> bool:
+    def lock_acquire(self, name: str, now: float, lease_seconds: float, owner: str) -> bool:
         return self._put_if({**self._lock_key(name), "expires_at": self._num(now + lease_seconds),
-                             "ttl": int(now + 3600)},
+                             "owner": owner, "ttl": int(now + 3600)},
                             "attribute_not_exists(incident_id) OR expires_at <= :now", {":now": self._num(now)})
 
-    def lock_release(self, name: str) -> None:
-        # IAM khong cho xoa ROLE_REQ#*: mo khoa = dat het han ve 0
-        self._table.update_item(Key=self._lock_key(name), UpdateExpression="SET expires_at = :z",
-                                ExpressionAttributeValues={":z": 0})
+    def lock_release(self, name: str, owner: str) -> None:
+        # IAM khong cho xoa ROLE_REQ#*: mo khoa = dat het han ve 0. Chi khi minh con la chu khoa
+        # (het han roi bi worker khac lay thi dieu kien sai -> bo qua, khong mo khoa cua nguoi khac).
+        try:
+            self._table.update_item(Key=self._lock_key(name), UpdateExpression="SET expires_at = :z",
+                                    ConditionExpression="#o = :me", ExpressionAttributeNames={"#o": "owner"},
+                                    ExpressionAttributeValues={":z": 0, ":me": owner})
+        except Exception as exc:
+            if not self._conditional_failed(exc):
+                raise
 
     def pin_fail(self, principal: str) -> int:
         res = self._table.update_item(Key=self._pin_key(principal), UpdateExpression="ADD failures :one",
@@ -556,13 +565,16 @@ class Governance:
         if req["status"] != "pending":
             raise RequestClosed()
         if req["created_at"] + REQUEST_TTL_SECONDS < self._clock():
-            self._store.req_finish(request_id, "expired")
+            with self._execution_lock():
+                self._store.req_finish(request_id, "expired")
             raise RequestExpired()
         directory = self._directory()
         voters, needed = self._eligible_voter(voter, directory, req)
         if not approve:
-            if not self._store.req_finish(request_id, "rejected"):
-                raise RequestClosed()
+            # Cung khoa voi _execute: khong dong yeu cau giua luc mot worker khac dang goi Cognito cho no.
+            with self._execution_lock():
+                if not self._store.req_finish(request_id, "rejected"):
+                    raise RequestClosed()
             return {"status": "rejected", **self._outcome(req)}
         bootstrap = self._bootstrap_promotion(directory, req, voter)
         if voter in req["approvals"] and not bootstrap and len(set(req["approvals"]) & voters) < needed:
@@ -579,9 +591,7 @@ class Governance:
         """Thuc thi duoi khoa dung chung: moi lan chi mot thao tac, kiem tra lai danh ba ngay truoc khi goi
         Cognito (hai yeu cau ha admin chay song song khong the cung thay 3 admin). Chi danh dau 'executed'
         SAU KHI Cognito thanh cong; Cognito loi -> yeu cau van cho (ChangeFailed)."""
-        if not self._store.lock_acquire(EXECUTE_LOCK, self._clock(), EXECUTE_LOCK_SECONDS):
-            raise Busy()
-        try:
+        with self._execution_lock():
             current = self._store.req_get(req["id"])
             if not current or current["status"] != "pending":
                 raise RequestClosed()
@@ -601,8 +611,18 @@ class Governance:
                 raise ExecutionFailed()
             self._store.req_finish(req["id"], "executed")
             return {"status": "executed", **outcome}
+
+    @contextlib.contextmanager
+    def _execution_lock(self):
+        """Khoa dung chung moi worker cho moi lan dong yeu cau (thuc thi, tu choi, het han). Dang co nguoi giu -> Busy.
+        Moi lan lay khoa co ma chu rieng: worker cham qua han khong mo khoa cua worker lay khoa sau no."""
+        owner = secrets.token_hex(8)
+        if not self._store.lock_acquire(EXECUTE_LOCK, self._clock(), EXECUTE_LOCK_SECONDS, owner):
+            raise Busy()
+        try:
+            yield
         finally:
-            self._store.lock_release(EXECUTE_LOCK)
+            self._store.lock_release(EXECUTE_LOCK, owner)
 
     @staticmethod
     def _outcome(req: dict) -> dict:

@@ -567,7 +567,8 @@ def test_admin_approves_pending_user_and_it_is_audited(acct):
     assert post(acct, "/api/users/approve", {"username": "uid-p"}, csrf=csrf).status_code == 200
     audit = acct.logs()[-1]
     assert audit["event_type"] == "USER_APPROVED" and audit["target_user"] == "p@x.co" and audit["username"] == "admin"
-    # lan dang nhap sau, nguoi do da la viewer
+    # lan dang nhap sau (duyet xong thi phien cu bi huy), nguoi do da la viewer
+    acct.clock.t += 1
     other = "198.51.100.77"
     sign_in(acct, "p@x.co", ip=other)
     assert get(acct, "/api/session", ip=other).get_json()["role"] == "viewer"

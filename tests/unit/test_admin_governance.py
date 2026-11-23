@@ -341,12 +341,36 @@ def test_failed_cognito_call_keeps_the_request_open_and_is_logged(team):
 def test_executions_are_serialised_by_a_shared_lock(team):
     """Hai worker thuc thi cung luc co the cung thay 3 admin roi cung ha mot nguoi -> con 1 admin."""
     rid = request_change(team, "a@x.co", "promote", "v@x.co").get_json()["id"]
-    assert team.gov_store.lock_acquire("execute", team.clock(), 30) is True  # worker khac dang thuc thi
+    assert team.gov_store.lock_acquire("execute", team.clock(), 30, "other") is True  # worker khac dang thuc thi
     r = vote(team, "b@x.co", rid)
     assert r.status_code == 409 and r.get_json()["error"] == "busy"
     assert role(team, "v@x.co") == "viewer"
     team.clock.t += 31  # khoa tu het han (worker kia chet giua chung)
     assert vote(team, "b@x.co", rid).get_json()["status"] == "executed"
+
+
+def test_a_rejection_cannot_slip_in_while_the_change_is_being_executed(team):
+    """B bo phieu quyet dinh, trong luc Lambda dang goi Cognito thi C bam Tu choi. Truoc day phieu cua C
+    ghi 'rejected' ngay giua chung: Cognito van doi vai tro nhung ban ghi noi 'da tu choi'. Nay C phai doi."""
+    import types
+    team.identity.add("c@x.co", mfa=True, role="admin")
+    c_browser = types.SimpleNamespace(**vars(team))
+    c_browser.client = team.app.test_client()
+    enter(c_browser, "c@x.co")
+    rid = request_change(team, "a@x.co", "promote", "v@x.co").get_json()["id"]
+
+    real, seen = team.identity.promote, {}
+
+    def promote_while_c_rejects(username):
+        seen["reject"] = vote(c_browser, "c@x.co", rid, "reject")
+        return real(username)
+
+    team.identity.promote = promote_while_c_rejects
+    r = vote(team, "b@x.co", rid)
+    assert r.get_json()["status"] == "executed" and role(team, "v@x.co") == "admin"
+    assert seen["reject"].status_code == 409 and seen["reject"].get_json()["error"] == "busy"
+    assert team.gov_store.req_get(rid)["status"] == "executed"
+    assert not [e for e in team.logs() if e["event_type"] == "ROLE_REQUEST_REJECTED"]
 
 
 def test_admin_count_and_warning_data_are_visible_before_unlocking(team):
@@ -475,6 +499,16 @@ def test_other_users_sessions_are_untouched(team):
     rid = request_change(team, "a@x.co", "promote", "v@x.co").get_json()["id"]
     assert vote(team, "b@x.co", rid).get_json()["status"] == "executed"
     assert b_get("/api/users").status_code == 200  # phien khac cua nguoi bo phieu van con
+
+
+def test_revoked_viewer_session_dies_immediately(team):
+    """Thu hoi Nguoi xem: nguoi do bi dang xuat ngay, khong doc tiep su co toi het 30 phut."""
+    v_get = second_browser(team, "v@x.co")
+    assert v_get("/api/overview").status_code == 200
+    team.clock.t += 1
+    csrf = enter(team, "a@x.co")
+    assert post(team, "/api/users/revoke", {"username": "uid-v"}, csrf=csrf).status_code == 200
+    assert v_get("/api/overview").status_code == 401
 
 
 # ------------------------------------------------------- dat lai PIN

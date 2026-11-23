@@ -114,7 +114,7 @@ def test_non_base32_totp_rejected(mod, env):
 
 
 def test_no_hardcoded_secrets_in_source():
-    src = (Path(APP_SRC) / "app.py").read_text()
+    src = (Path(APP_SRC) / "app.py").read_text(encoding="utf-8")
     for leaked in ("JBSWY3DPEHPK3PXP", "CorrectPassword123!", "IncidentTable8CE1664B", "api.qrserver.com"):
         assert leaked not in src
 

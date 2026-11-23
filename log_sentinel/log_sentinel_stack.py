@@ -511,8 +511,6 @@ class LogSentinelStack(Stack):
             resources=[self.incident_table.table_arn],
             conditions={"ForAllValues:StringLike": {"dynamodb:LeadingKeys": ["REVOKED_SESSION#*"]}},
         ))
-        # Muc Phan quyen (sample_app/admin_governance.py): PIN rieng cua admin (ADMIN_PIN#, xoa = dat lai PIN)
-        # va yeu cau nang/ha/vo hieu hoa cho bo phieu (ROLE_REQ#, khong xoa duoc: giu dau vet).
         # Muc Phan quyen: PIN rieng cua admin (ADMIN_PIN#, xoa = dat lai PIN) kiem tra tren EC2. Yeu cau va phieu
         # bau (ROLE_REQ#) chi Lambda thuc thi phan quyen ghi duoc; EC2 chi doc (GetItem / Query o tren).
         vm_role.add_to_policy(iam.PolicyStatement(
