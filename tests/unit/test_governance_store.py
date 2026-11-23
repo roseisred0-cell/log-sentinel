@@ -93,11 +93,20 @@ def test_new_pin_after_reset_starts_unlocked(store):
 
 # ------------------------------------------------- khoa thuc thi dung chung
 def test_execution_lock_is_exclusive_until_released_or_expired(store):
-    assert store.lock_acquire("execute", 1_000.0, 30) is True
-    assert store.lock_acquire("execute", 1_010.0, 30) is False   # worker khac dang giu
-    store.lock_release("execute")
-    assert store.lock_acquire("execute", 1_011.0, 30) is True
-    assert store.lock_acquire("execute", 1_042.0, 30) is True    # het han 30s: worker giu khoa da chet
+    assert store.lock_acquire("execute", 1_000.0, 30, "w1") is True
+    assert store.lock_acquire("execute", 1_010.0, 30, "w2") is False   # worker khac dang giu
+    store.lock_release("execute", "w1")
+    assert store.lock_acquire("execute", 1_011.0, 30, "w2") is True
+    assert store.lock_acquire("execute", 1_042.0, 30, "w3") is True    # het han 30s: worker giu khoa da chet
+
+
+def test_a_late_worker_cannot_release_a_lock_someone_else_now_holds(store):
+    """w1 cham qua 30s nen khoa het han va w2 lay khoa. Lenh nha khoa muon cua w1 khong duoc mo khoa cua w2,
+    neu khong w3 se chay song song voi w2 (hai lenh ha admin cung thay 3 admin)."""
+    assert store.lock_acquire("execute", 1_000.0, 30, "w1") is True
+    assert store.lock_acquire("execute", 1_031.0, 30, "w2") is True
+    store.lock_release("execute", "w1")
+    assert store.lock_acquire("execute", 1_032.0, 30, "w3") is False
 
 
 def test_pin_delete(store):

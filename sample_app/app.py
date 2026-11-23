@@ -19,7 +19,7 @@ Giao dien khach hang: https://<host>/console  (phien 30 phut). Hai cach dang nha
             caller_auth.py (Lambda xac minh nguoi goi bang token Cognito),
             chat_assistant.py (tro ly AI: huong dan + phan tich su co, goi OpenAI tu may chu)
 
-Gunicorn: gunicorn -w 4 -b 127.0.0.1:8080 'app:create_app()'
+Gunicorn (xem deploy/webapp.service): gthread, 2 worker x 16 luong, bind 127.0.0.1:8080
 """
 import base64
 import binascii
@@ -1128,6 +1128,9 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
         email, refused = _execute(op, pin_required=False, username=str(_json().get("username") or "")[:128])
         if refused:
             return refused
+        # Vai tro doc luc dang nhap: huy moi phien de thay doi co hieu luc ngay (bi thu hoi mat quyen doc;
+        # duoc duyet dang nhap lai la thanh Nguoi xem).
+        revocations.revoke_user(f"cognito:{email}", clock())
         write_security_log(log_event, 200, username=session["user"], target_user=email)
         return jsonify({"ok": True}), 200
 
@@ -1243,7 +1246,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
             blocks = [_block_view(b) for b in store.active_blocks(time.time())]
         except Exception as exc:
             print(f"[ERROR] Console doc du lieu loi: {type(exc).__name__}", flush=True)
-            return jsonify({"error": "Khong doc duoc du lieu su co"}), 502
+            return jsonify({"error": "Không đọc được dữ liệu sự cố."}), 502
         return jsonify({"incidents": incidents, "blocks": blocks, "server_time": int(time.time())}), 200
 
     # khoang -> (so o, do dai o, so su co doc toi da, giay luu ket qua). 7/30 ngay doc nhieu hon nen luu 5 phut:
@@ -1261,7 +1264,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
         except ValueError:
             tz = None
         if rng not in STATS_RANGES or tz is None or not -720 <= tz <= 840:
-            return jsonify({"error": "Khoang thoi gian hoac mui gio khong hop le"}), 400
+            return jsonify({"error": "Khoảng thời gian hoặc múi giờ không hợp lệ."}), 400
         slots, slot_seconds, limit, ttl = STATS_RANGES[rng]
         now = clock()
         with stats_lock:
@@ -1273,7 +1276,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
             items = store.incidents_since(since, limit)
         except Exception as exc:
             print(f"[ERROR] Thong ke doc du lieu loi: {type(exc).__name__}", flush=True)
-            return jsonify({"error": "Khong doc duoc du lieu su co"}), 502
+            return jsonify({"error": "Không đọc được dữ liệu sự cố."}), 502
         summary = incident_stats.summarize(items, now, slots=slots, slot_seconds=slot_seconds, tz_minutes=tz)
         summary.update(range=rng, limit=limit, truncated=len(items) >= limit)
         if ttl:
@@ -1306,7 +1309,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
             recent = [_incident_view(i) for i in store.recent_incidents(50)]
         except Exception as exc:
             print(f"[ERROR] Chat doc su co loi: {type(exc).__name__}", flush=True)
-            return jsonify({"error": "Khong doc duoc du lieu su co"}), 502
+            return jsonify({"error": "Không đọc được dữ liệu sự cố."}), 502
         if incident_id is not None:
             # Chi su co nguoi dung von xem duoc trong Console (50 su co gan nhat)
             recent = [i for i in recent if i["id"] == incident_id]
