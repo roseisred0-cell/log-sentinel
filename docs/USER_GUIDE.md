@@ -35,7 +35,7 @@
 
 **Mã PIN riêng.** Lần đầu vào mục **Phân quyền**, bạn tự đặt một PIN 6 số, khác mật khẩu đăng nhập. Không dùng mã dễ đoán như `123456`, `000000`, `121212`, `112233`. Nhập PIN đúng thì mục mở trong **10 phút**; hết giờ hoặc đăng xuất phải nhập lại. Sai **5 lần** thì PIN bị khóa **15 phút**, và các quản trị viên khác nhận cảnh báo.
 
-**Thao tác cần nhiều người đồng ý.** Mỗi lần bấm, bạn nhập PIN vào ô *PIN xác nhận*:
+**Thao tác cần nhiều người đồng ý.** Mọi thao tác chỉ làm được khi mục đang mở. Riêng đề xuất, **Đồng ý**, **Từ chối** và **Đặt lại PIN** phải nhập lại PIN vào ô *PIN xác nhận* mỗi lần bấm:
 
 | Thao tác | Ai làm | Cần bao nhiêu người đồng ý |
 |---|---|---|
@@ -45,7 +45,8 @@
 
 - Người đề xuất tính là một phiếu. Các quản trị viên khác nhận email/Telegram và vào bảng **Yêu cầu chờ duyệt** để bấm **Đồng ý** hoặc **Từ chối**. Một phiếu từ chối hủy yêu cầu ngay. Yêu cầu hết hạn sau **24 giờ**.
 - Hệ thống **luôn giữ tối thiểu 2 quản trị viên**: không hạ hay vô hiệu hóa được nếu sẽ còn dưới 2. Khi đang dưới 2, mục Phân quyền hiện cảnh báo đỏ. Không ai tự hạ quyền hay tự vô hiệu hóa chính mình được.
-- Khi thao tác có hiệu lực, người bị tác động bị đăng xuất khỏi mọi phiên và phải đăng nhập lại để nhận vai trò mới. Người vừa được nâng lên Quản trị sẽ phải bật 2FA trước khi làm việc.
+- Khi thao tác có hiệu lực (kể cả duyệt hay thu hồi Người xem), người bị tác động bị đăng xuất khỏi mọi phiên và phải đăng nhập lại để nhận vai trò mới.
+- Nâng/hạ quyền, vô hiệu hóa, đề xuất mới, đặt lại hay khóa PIN đều gửi cảnh báo email/Telegram. Duyệt, thu hồi Người xem và từ chối yêu cầu chỉ ghi vào nhật ký kiểm toán, không gửi cảnh báo. Người vừa được nâng lên Quản trị sẽ phải bật 2FA trước khi làm việc.
 
 **Quên PIN.** Nhờ một quản trị viên khác bấm **Đặt lại PIN** cạnh tên bạn (người đó nhập PIN của chính họ). Lần vào sau bạn tự đặt PIN mới. Mỗi lần đặt lại đều có cảnh báo.
 

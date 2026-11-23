@@ -44,7 +44,7 @@ Tổng quan và trạng thái hệ thống: [PROPOSAL.md](PROPOSAL.md). Quyết 
 - Vẽ sơ đồ kiến trúc.
 - Phân tích bảo mật, chưa sửa. Các điểm yếu theo thứ tự nên sửa:
   1. WAF thiếu `CommonRuleSet` / `SQLiRuleSet`.
-  2. Nginx tin `X-Forwarded-For` từ mọi nguồn.
+  2. Nginx tin `X-Forwarded-For` từ mọi nguồn. (23/11 đính chính: không khai thác được, vì chỉ CloudFront vào được máy, có header bí mật, và `real_ip_recursive off` chỉ lấy địa chỉ CloudFront tự nối vào.)
   3. CloudFront → EC2 đi HTTP.
   4. Chỉ có một EC2.
 - **Trợ lý AI dùng OpenAI** (5 seam TDD): `sample_app/chat_assistant.py`, route `POST /api/chat`, hạn mức trong DynamoDB, chỉ đọc. Biện pháp bảo mật ghi ở `SECURITY_REVIEW.md` mục 6.
@@ -70,6 +70,12 @@ Tổng quan và trạng thái hệ thống: [PROPOSAL.md](PROPOSAL.md). Quyết 
   - Elastic IP `13.215.187.81`;
   - CloudFront `dww0e125hyfiv.cloudfront.net`.
 - Viết `PROPOSAL.md`. Gọn tài liệu: gộp 3 nhật ký thành file này, bỏ `TONG_QUAN_DU_AN.md`, cắt phần cũ trong `SECURITY_REVIEW.md`.
+- Đẩy lên GitHub hai nhánh `so-do-va-tai-lieu` và `sua-3-loi`.
+- Review hai trục (quy chuẩn + đặc tả, kỹ năng `code-review`) toàn bộ code từ baseline. Sửa bằng TDD:
+  - Phiếu từ chối hoặc hết hạn chen vào lúc đang thực thi: Cognito đã đổi vai trò mà bản ghi ghi "đã từ chối". Nay mọi lần đóng yêu cầu đi qua cùng một khóa.
+  - Khóa thực thi có thể bị nhả bởi worker không giữ nó (worker chậm quá 30 giây). Nay mỗi lần lấy khóa có mã chủ riêng.
+  - Thu hồi (hoặc duyệt) Người xem không hủy phiên, người bị thu hồi vẫn đọc được sự cố tới 30 phút. Nay đăng xuất ngay.
+  - Sửa nhỏ: chuỗi lỗi hiển thị cho người dùng thiếu dấu, comment và docstring lỗi thời; tài liệu PIN và cảnh báo cho khớp code. 856 test.
 
 ## Quyết định thiết kế đã chốt
 
@@ -87,8 +93,8 @@ Luồng vào mục Phân quyền: đăng nhập (admin bắt buộc 2FA) → m�
 | 2FA | Admin Cognito chưa bật 2FA chỉ thấy màn hình "Bật 2FA". Admin không có nút "Tắt 2FA". Người xem: 2FA tùy chọn |
 | PIN | Đúng 6 chữ số, chặn mã dễ đoán, băm scrypt. Nhập đúng thì mục mở 10 phút. Sai 5 lần khóa 15 phút và sinh `ADMIN_PIN_LOCKED` |
 | Quên PIN | Một admin khác đặt lại, không cần thêm người duyệt. PIN của `admin` nội bộ đặt lại bằng AWS CLI |
-| Thực thi | Mọi thay đổi chạy trong Lambda `GovernanceExecutor`, Lambda tự xác minh người bấm bằng token Cognito. Lambda chỉ tin `admin` nội bộ (không có token) trong chế độ khởi tạo |
-| Cảnh báo | Mỗi thao tác sinh cảnh báo HIGH qua email/Telegram, không khóa IP |
+| Thực thi | Mọi thay đổi vai trò (nâng, hạ, vô hiệu hóa, duyệt và thu hồi Người xem) chạy trong Lambda `GovernanceExecutor`, Lambda tự xác minh người bấm bằng token Cognito. Lambda chỉ tin `admin` nội bộ (không có token) trong chế độ khởi tạo. PIN được kiểm tra và đặt lại trên EC2 (rủi ro ghi ở `SECURITY_REVIEW.md` mục 7) |
+| Cảnh báo | Nâng/hạ quyền, vô hiệu hóa, đề xuất mới, thực thi thất bại, đặt lại và khóa PIN sinh cảnh báo HIGH qua email/Telegram, không khóa IP. Duyệt, thu hồi Người xem và từ chối yêu cầu chỉ ghi nhật ký kiểm toán |
 
 ### Trợ lý AI (19/11)
 
@@ -106,6 +112,6 @@ Luồng vào mục Phân quyền: đăng nhập (admin bắt buộc 2FA) → m�
 ## Việc còn mở
 
 - Lấy lại PIN bằng câu hỏi bảo mật: có thiết kế và kế hoạch, chưa làm.
-- Điểm yếu chưa sửa: WAF thiếu bộ luật OWASP; Nginx tin `X-Forwarded-For`; G3, G4, G5 (`SECURITY_REVIEW.md` mục 8.4).
+- Điểm yếu chưa sửa: WAF chưa bật `CommonRuleSet`; G3, G4, G5 (`SECURITY_REVIEW.md` mục 8.4).
 - Đa khách hàng và tích hợp web của khách: chủ dự án chưa quyết.
 - Lưu ý nhóm: các nhánh của Người B sửa nhiều phần hạ tầng của Người A (stack CDK, Nginx, bootstrap), nên Người A cần xem trước khi gộp vào `main`. AWS CLI trên máy đang dùng IAM user của Người A.
