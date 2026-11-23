@@ -92,6 +92,7 @@ Thiết kế: [NHAT_KY.md](NHAT_KY.md), mục Phân quyền admin. Tóm tắt c�
 - **PIN riêng cho mục Phân quyền.** 6 số, chặn mã dễ đoán, băm scrypt (muối riêng), mở 10 phút. Sai 5 lần khóa 15 phút; bộ đếm nằm trong DynamoDB nên dùng chung mọi worker và không mất khi đăng nhập lại. Mỗi phiếu (đồng ý hoặc từ chối) đều phải nhập lại PIN.
 - **Bỏ phiếu.** Nâng hoặc hạ Quản trị cần đa số trên tất cả admin (tối thiểu 2 phiếu, người bị hạ không bỏ phiếu); vô hiệu hóa cần 2 người. Một phiếu từ chối hủy yêu cầu. Yêu cầu hết hạn sau 24 giờ. Danh sách người được bỏ phiếu lấy trực tiếp từ Cognito mỗi lần bỏ phiếu.
 - **Luôn tối thiểu 2 admin**, kiểm tra cả lúc tạo yêu cầu lẫn ngay trước khi thực thi. Việc thực thi đi qua một khóa dùng chung (`ROLE_REQ#LOCK#execute`), nên hai yêu cầu hạ quyền chạy song song không thể cùng thấy 3 admin.
+- **Mọi lần đóng yêu cầu (thực thi, từ chối, hết hạn) đi qua cùng khóa.** Phiếu từ chối không chen được vào lúc đang gọi Cognito. Mỗi lần lấy khóa có mã chủ riêng, nên worker chậm quá 30 giây không nhả được khóa của worker khác (sửa 23/11).
 - **Chỉ đánh dấu "đã thực thi" sau khi Cognito thành công.** Cognito lỗi thì yêu cầu vẫn chờ và có cảnh báo `ROLE_CHANGE_FAILED`.
 - **Thay đổi có hiệu lực ngay.** Người bị nâng, hạ quyền hoặc vô hiệu hóa bị hủy mọi phiên (`REVOKED_SESSION#user:...`); worker khác biết trong tối đa 15 giây.
 - **Chế độ khởi tạo.** Khi chưa đủ 2 admin Cognito, `admin` nội bộ được bỏ phiếu và tự nâng một Người xem lên Quản trị. Khi đã đủ, tài khoản này chỉ còn xem và gỡ khóa IP.
