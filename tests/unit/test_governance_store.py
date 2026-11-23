@@ -143,6 +143,16 @@ def test_request_list(store):
     assert sorted(r["id"] for r in store.req_list()) == ["r1", "r2"]
 
 
+def test_request_list_returns_every_request_however_many_closed_ones_pile_up(store):
+    # Yeu cau da dong duoc giu 7 ngay (TTL don rac). Id ngau nhien nen yeu cau dang cho co the nam o bat ky dau
+    # trong ket qua: danh sach phai doc het, neu khong yeu cau cho duyet bien mat khoi muc Phan quyen.
+    for i in range(205):
+        store.req_put(_req(f"old{i:03d}", status="executed"))
+    store.req_put(_req("zzz-pending"))
+    ids = [r["id"] for r in store.req_list()]
+    assert len(ids) == 206 and "zzz-pending" in ids
+
+
 # ------------------------------------------------ rieng cho DynamoDB
 def test_dynamo_keys_use_the_prefixes_iam_allows(dynamo):
     s = gm.DynamoGovernanceStore(TABLE, REGION)

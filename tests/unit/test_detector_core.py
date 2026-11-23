@@ -138,6 +138,17 @@ def test_allowlisted_admin_cidr_never_blocked(monkeypatch):
     assert d.auto_block_attacker_ip("198.51.100.1", "x") is True
 
 
+def test_ipv4_written_as_ipv6_mapped_is_the_same_ip_for_allowlist_and_block_key(monkeypatch):
+    # Socket dual-stack ghi IPv4 thanh ::ffff:a.b.c.d: van la IP cua admin, khong duoc lot qua allowlist.
+    d = _load(monkeypatch, allowlist="203.0.113.0/24")
+    d.table = mock.MagicMock()
+    assert d.auto_block_attacker_ip("::ffff:203.0.113.77", "x") is False
+    assert d.auto_block_attacker_ip("::ffff:127.0.0.1", "x") is False
+    # IP la: khoa dung khoa IPv4 ma web app tra cuu (BLOCKED_IP#<ipv4>), WAF (chi IPv4) cung dong bo duoc.
+    assert d.auto_block_attacker_ip("::ffff:198.51.100.1", "x") is True
+    assert d.table.put_item.call_args.kwargs["Item"]["incident_id"] == "BLOCKED_IP#198.51.100.1"
+
+
 def test_sqli_records_and_blocks(det):
     det.evaluate_webapp_log(json.dumps({"event_type": "SQL_INJECTION", "client_ip": "203.0.113.5",
                                         "payload": "' OR 1=1 --"}))

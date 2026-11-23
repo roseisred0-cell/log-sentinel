@@ -55,6 +55,13 @@ class MemoryChatQuota:
             self._counts[key] = self._counts.get(key, 0) + 1
             return True
 
+    def release(self, principal: str, day: str) -> None:
+        """Tra lai 1 luot (AI loi, nguoi dung khong nhan duoc tra loi). Khong xuong duoi 0."""
+        with self._lock:
+            key = (principal, day)
+            if self._counts.get(key, 0) > 0:
+                self._counts[key] -= 1
+
 
 class DynamoChatQuota:
     """Bo dem dung chung giua cac worker trong IncidentTable: khoa CHAT_QUOTA#<nguoi dung> / <ngay UTC>.
@@ -82,6 +89,20 @@ class DynamoChatQuota:
             if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
                 return False
             raise
+
+    def release(self, principal: str, day: str) -> None:
+        """Giam co dieu kien (count > 0): tra lai dung 1 luot, khong bao gio am."""
+        from botocore.exceptions import ClientError
+        try:
+            self._table.update_item(
+                Key={"incident_id": f"CHAT_QUOTA#{principal}", "timestamp": day},
+                UpdateExpression="ADD #c :minus_one",
+                ConditionExpression="#c > :zero",
+                ExpressionAttributeNames={"#c": "count"},
+                ExpressionAttributeValues={":minus_one": -1, ":zero": 0})
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
 
 
 class ChatAssistant:
@@ -123,6 +144,11 @@ class ChatAssistant:
         try:
             return self._provider.complete(instructions, [{"role": "user", "content": content}])
         except Exception as exc:  # loi nha cung cap co the chua chi tiet nhay cam: chi ghi ten loai
+            # Nguoi dung khong nhan duoc tra loi va duoc bao "thu lai sau": tra lai luot vua tru.
+            try:
+                self._quota.release(principal, day)
+            except Exception:  # khong tra duoc luot thi van bao loi AI nhu cu, khong de loi nay che mat
+                pass
             raise ChatUnavailable("Trợ lý AI tạm thời không trả lời được. Thử lại sau.") from exc
 
 

@@ -125,6 +125,8 @@ def _blockable_ip(raw_ip):
         ip = ipaddress.ip_address(str(raw_ip).strip())
     except ValueError:
         return None
+    # ::ffff:a.b.c.d (socket dual-stack) la IPv4: quy ve IPv4 de allowlist / loopback / khoa BLOCKED_IP# khop.
+    ip = getattr(ip, "ipv4_mapped", None) or ip
     if ip.is_loopback or ip.is_unspecified or ip.is_link_local:
         return None
     if any(ip in net for net in BLOCK_ALLOWLIST):

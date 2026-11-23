@@ -125,6 +125,26 @@ def test_ai_failure_becomes_a_short_message_without_leaking_provider_details():
     assert err.value.status == 503 and "sk-" not in str(err.value)
 
 
+def test_a_failed_ai_reply_does_not_use_up_a_turn_so_the_user_can_retry():
+    class FlakyProvider:
+        def __init__(self):
+            self.failures_left = 3
+
+        def complete(self, instructions, messages):
+            if self.failures_left:
+                self.failures_left -= 1
+                raise RuntimeError("OpenAI 503")
+            return "ok"
+
+    a = assistant(FlakyProvider(), daily_limit=1)
+    for _ in range(3):   # thong bao loi bao "thu lai sau": thu lai khong duoc ton luot
+        with pytest.raises(ca.ChatUnavailable):
+            a.ask("cognito:a@x.co", "hello")
+    assert a.ask("cognito:a@x.co", "hello") == "ok"
+    with pytest.raises(ca.ChatQuotaExceeded):   # cau tra loi thanh cong van tinh luot nhu cu
+        a.ask("cognito:a@x.co", "hello")
+
+
 # --------------------------------------------- Seam 3: adapter OpenAI (client gia)
 class FakeOpenAI:
     def __init__(self, text="Day la tan cong SQL injection."):
