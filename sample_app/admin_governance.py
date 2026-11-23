@@ -356,10 +356,17 @@ class DynamoGovernanceStore:
         return self._req_view(item) if item else None
 
     def req_list(self) -> list:
+        """Moi yeu cau (ca da dong, giu 7 ngay). Doc het moi trang: id ngau nhien nen yeu cau dang cho co the
+        nam o bat ky trang nao."""
         from boto3.dynamodb.conditions import Key
-        res = self._table.query(IndexName="by_type", KeyConditionExpression=Key("record_type").eq(self.REQ_TYPE),
-                                Limit=200)
-        return [self._req_view(i) for i in res.get("Items", [])]
+        kwargs = {"IndexName": "by_type", "KeyConditionExpression": Key("record_type").eq(self.REQ_TYPE)}
+        items = []
+        while True:
+            res = self._table.query(**kwargs)
+            items.extend(res.get("Items", []))
+            if "LastEvaluatedKey" not in res:
+                return [self._req_view(i) for i in items]
+            kwargs["ExclusiveStartKey"] = res["LastEvaluatedKey"]
 
     def _update_if_pending(self, request_id: str, expression: str, values: dict) -> Optional[dict]:
         """UpdateItem chi khi yeu cau con 'pending'. Tra ve thuoc tinh moi, hoac None neu yeu cau da dong."""

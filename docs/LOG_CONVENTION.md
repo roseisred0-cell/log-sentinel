@@ -85,7 +85,7 @@ Mọi dòng log là JSON thuần ASCII (`\uXXXX` cho ký tự khác): dữ liệ
 | `REVOKED_SESSION#<sid>` | `REVOKED` | Phiên Console đã đăng xuất (web app ghi; cookie cũ bị từ chối) | Hết tuổi thọ phiên + 60 giây |
 | `REVOKED_SESSION#user:<auth>:<user>` | `REVOKED` | Hủy mọi phiên của một người đăng nhập trước `revoked_at` (sau khi bị nâng/hạ quyền hoặc vô hiệu hóa) | 8 giờ + 60 giây |
 | `ADMIN_PIN#<auth>:<user>` | `PIN` | PIN mục Phân quyền: `hash` (scrypt), `salt`, `failures`, `locked_until`. Xóa = đặt lại PIN | Không |
-| `CHAT_QUOTA#<auth>:<user>` | `<ngày UTC>` (`2026-11-19`) | Số câu đã hỏi trợ lý AI trong ngày (`count`), tăng có điều kiện `count < CHAT_DAILY_LIMIT`. Chỉ có khi bật `chat_model` | 2 ngày |
+| `CHAT_QUOTA#<auth>:<user>` | `<ngày UTC>` (`2026-11-19`) | Số câu đã hỏi trợ lý AI trong ngày (`count`), tăng có điều kiện `count < CHAT_DAILY_LIMIT`; AI lỗi thì trả lại lượt (giảm có điều kiện `count > 0`). Chỉ có khi bật `chat_model` | 2 ngày |
 | `ROLE_REQ#<id>` | `REQ` | Yêu cầu chờ duyệt: `action`, `target_username`, `target_email`, `initiator`, `approvals` (string set), `status` (`pending` \| `executed` \| `rejected` \| `expired` \| `failed`), `created_at`. Hết hạn 24 giờ kiểm tra trong code | 7 ngày (dọn rác) |
 | `ROLE_REQ#LOCK#execute` | `LOCK` | Khóa dùng chung để mỗi lần chỉ thực thi một thao tác phân quyền (`expires_at`, tự hết sau 30 giây) | 1 giờ |
 

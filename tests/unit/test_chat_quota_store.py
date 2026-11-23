@@ -19,6 +19,17 @@ def test_counts_up_to_the_limit_per_user_and_day(quota):
     assert quota.consume("cognito:a@x.co", "2026-11-20", 3) is True
 
 
+def test_release_gives_back_one_turn_and_never_goes_below_zero(quota):
+    assert quota.consume("u", "d", 1) is True
+    quota.release("u", "d")
+    assert quota.consume("u", "d", 1) is True     # luot vua tra lai dung duoc
+    assert quota.consume("u", "d", 1) is False
+    quota.release("u", "d")
+    quota.release("u", "d")                       # tra du: khong tao them luot "am"
+    quota.release("other", "d")                   # chua dung luot nao: khong loi
+    assert [quota.consume("u", "d", 1) for _ in range(2)] == [True, False]
+
+
 def test_dynamo_key_uses_the_prefix_iam_allows_and_expires(dynamo):
     q = ca.DynamoChatQuota(TABLE, REGION)
     q.consume("cognito:a@x.co", "2026-11-19", 5)
