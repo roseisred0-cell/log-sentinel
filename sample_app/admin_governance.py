@@ -15,7 +15,7 @@ Giao dien cho web app:
 `principal` = "<auth>:<user>", vd "local:admin", "cognito:a@x.co".
 `identity` = CognitoIdentity (hoac ban gia): list_users / promote / demote / disable.
 
-Quy tac (docs/NHAT_KY.md, muc "Phan quyen admin"):
+Quy tac:
   - nang / ha Quan tri: da so admin dong y, toi thieu 2 phieu; nguoi bi ha khong bo phieu
   - vo hieu hoa: 2 nguoi. Mot phieu tu choi huy yeu cau. Yeu cau het han sau 24 gio.
   - luon toi thieu 2 admin Cognito: chan ha / vo hieu hoa lam so admin xuong duoi 2

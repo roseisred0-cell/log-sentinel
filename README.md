@@ -17,13 +17,9 @@ CloudTrail (multi-region, KMS) ─> S3 + /logsentinel/cloudtrail ─────
 
 | Tài liệu | Nội dung |
 |---|---|
-| `docs/PROPOSAL.md` | Tổng quan: bài toán, workflow 17 bước theo sơ đồ `docs/architecture/`, chi phí, tự đánh giá |
-| `docs/DEMO.md` | Kịch bản demo 15 phút: chuẩn bị, từng bước, phương án dự phòng, câu hỏi hay gặp |
-| `docs/NHAT_KY.md` | Nhật ký theo ngày, quyết định thiết kế đã chốt, việc còn mở |
 | `docs/SECURITY_REVIEW.md` | Lỗ hổng đã vá, biện pháp bảo mật từng tính năng, rủi ro còn lại, hướng mở rộng |
 | `docs/USER_GUIDE.md` | Hướng dẫn cho khách hàng: SOC Console (`/console`), ý nghĩa từng luật |
 | `docs/LOG_CONVENTION.md` | Hợp đồng log giữa web app và Detector |
-| `docs/COST.md` | Chi phí ước tính theo tháng cho từng chế độ, và chi phí khi bị tấn công |
 
 ## Chạy nhanh
 
