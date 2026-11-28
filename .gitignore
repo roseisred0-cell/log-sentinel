@@ -14,3 +14,7 @@ setup.html
 
 # file tam cua draw.io
 *.bkp
+
+# file sinh ra khi chay Hugo nham thu muc (khong thuoc du an)
+public/
+.hugo_build.lock
