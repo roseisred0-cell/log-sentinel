@@ -111,7 +111,7 @@ Key có hiệu lực từ câu hỏi kế tiếp, không cần khởi động l�
 | `SCAN_DETECTED` | Một IP gọi 30 đường dẫn không tồn tại trong 60 giây (đang dò tìm lỗ hổng) | IP đã tự khóa. Không cần làm gì thêm |
 | `ACCOUNT_UNDER_ATTACK` | Một tài khoản bị đoán sai 10 lần trong 5 phút từ **nhiều IP khác nhau** (tấn công phân tán) | Không IP nào bị khóa tự động. Đổi mật khẩu tài khoản đó, bật 2FA, cân nhắc thu hẹp `ingress_cidr` |
 | `SQL_INJECTION` | Có người thử chèn mã độc vào ô tìm kiếm | IP đã tự khóa. Không cần làm gì thêm |
-| `MFA_BYPASS_ATTEMPT` | Mật khẩu **đúng** nhưng mã OTP sai | **Đổi mật khẩu ngay**: mật khẩu có thể đã lộ |
+| `MFA_BYPASS_ATTEMPT` | Mật khẩu **đúng** nhưng sai mã OTP **5 lần trong 60 giây** (gõ nhầm 1–4 lần không bị khóa) | **Đổi mật khẩu ngay**: mật khẩu có thể đã lộ |
 | `ROOT_ACCOUNT_LOGIN` | Có người đăng nhập tài khoản root AWS | Xác nhận có phải mình không; nếu không, đổi mật khẩu root và gọi hỗ trợ AWS |
 | `CONSOLE_LOGIN_NO_MFA` | Đăng nhập AWS Console **thành công** mà không dùng MFA | Bật MFA cho user đó |
 | `CONSOLE_BRUTE_FORCE` | Một IP đăng nhập AWS Console sai 5 lần trong 5 phút | Kiểm tra user bị nhắm tới; đổi mật khẩu, bật MFA. Hệ thống không khóa được IP ở AWS Console |

@@ -35,7 +35,7 @@ def test_matrix_has_one_row_per_rule_sorted_by_total_and_folds_the_tail_into_oth
              + [inc("SCAN_DETECTED", "09:00"), inc("ROOT_ACCOUNT_LOGIN", "09:30"), inc("MFA_TAMPERING", "08:00")])
     s = incident_stats.summarize(items, NOW, max_rules=3)
     assert [(r["rule"], r["total"]) for r in s["rules"]] == [
-        ("SQL_INJECTION", 3), ("BRUTE_FORCE_DETECTED", 2), ("Khác", 3)]     # 2 luat dau + phan con lai
+        ("SQL_INJECTION", 3), ("BRUTE_FORCE_DETECTED", 2), ("Other", 3)]     # 2 luat dau + phan con lai
     sql = s["rules"][0]["counts"]
     assert len(sql) == 24 and sql[-1] == 3 and sum(sql) == 3
     assert s["max_cell"] == 3                                              # de to mau ma tran
@@ -46,16 +46,16 @@ def test_ignores_broken_records_and_incidents_older_than_the_window():
              {"rule": "X", "timestamp": "khong-phai-ngay"}, {"rule": "Y"}, {"timestamp": inc("A", "12:00")["timestamp"]}]
     s = incident_stats.summarize(items, NOW)
     assert s["total"] == 2
-    assert {r["rule"] for r in s["rules"]} == {"SQL_INJECTION", "(không rõ)"}
+    assert {r["rule"] for r in s["rules"]} == {"SQL_INJECTION", "(unknown)"}
 
 
 def test_each_slot_is_split_by_severity_for_the_stacked_columns():
     items = [inc("SQL_INJECTION", "15:05", severity="CRITICAL"), inc("BRUTE_FORCE_DETECTED", "15:10"),
              inc("BRUTE_FORCE_DETECTED", "15:20"), inc("X", "15:30", severity="MEDIUM"), inc("Y", "14:00", severity=None)]
     s = incident_stats.summarize(items, NOW)
-    assert list(s["series"]) == ["CRITICAL", "HIGH", "Khác"]              # thu tu xep chong co dinh
-    assert [s["series"][k][-1] for k in ("CRITICAL", "HIGH", "Khác")] == [1, 2, 1]
-    assert s["series"]["Khác"][-2] == 1 and s["max_slot"] == 4
+    assert list(s["series"]) == ["CRITICAL", "HIGH", "Other"]              # thu tu xep chong co dinh
+    assert [s["series"][k][-1] for k in ("CRITICAL", "HIGH", "Other")] == [1, 2, 1]
+    assert s["series"]["Other"][-2] == 1 and s["max_slot"] == 4
 
 
 def test_day_slots_follow_the_viewers_timezone_for_7_and_30_days():
@@ -86,7 +86,7 @@ def test_stats_route_defaults_to_24_hourly_slots_for_viewers(mod, env):
     assert r.status_code == 200
     body = r.get_json()
     assert (body["range"], body["slots"], body["slot_seconds"], body["limit"]) == ("24h", 24, 3600, 1000)
-    assert set(body["series"]) == {"CRITICAL", "HIGH", "Khác"} and "truncated" in body
+    assert set(body["series"]) == {"CRITICAL", "HIGH", "Other"} and "truncated" in body
 
 
 def _spy(a):

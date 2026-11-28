@@ -1,13 +1,13 @@
 // Cham diem do manh mat khau. Quy tac PHAI giong het password_strength.py (may chu chan lai khi dang ky).
 (function (root) {
   "use strict";
-  var LABELS = ["Rất yếu", "Yếu", "Trung bình", "Mạnh", "Rất mạnh"];
+  var LABELS = ["Very weak", "Weak", "Fair", "Strong", "Very strong"];
   var WARNINGS = [
-    "Rất dễ bị đoán ra — không được chấp nhận.",
-    "Mật khẩu yếu — không được chấp nhận.",
-    "Chấp nhận được, nhưng nên dài hơn và đa dạng ký tự hơn.",
-    "Mật khẩu tốt.",
-    "Mật khẩu rất tốt."
+    "Very easy to guess — not accepted.",
+    "Weak password — not accepted.",
+    "Acceptable, but longer and more varied is better.",
+    "Good password.",
+    "Very good password."
   ];
   var MIN_LEVEL = 2, MIN_LENGTH = 8;
   var COMMON = ("password passw0rd qwerty qwertyuiop azerty letmein welcome admin administrator iloveyou monkey " +
@@ -54,15 +54,15 @@
     }
 
     if (n === 0) return { level: 0, tips: [] };
-    if (n < MIN_LENGTH) tips.push("Dùng ít nhất " + MIN_LENGTH + " ký tự.");
-    else if (isCommon(pw)) tips.push("Mật khẩu này nằm trong danh sách mật khẩu phổ biến.");
-    if (n >= MIN_LENGTH && n < 12) tips.push("Dài từ 12 ký tự trở lên sẽ an toàn hơn nhiều.");
-    if (!upper) tips.push("Thêm chữ hoa.");
-    if (!lower) tips.push("Thêm chữ thường.");
-    if (!digit) tips.push("Thêm chữ số.");
-    if (!symbol) tips.push("Thêm ký tự đặc biệt (ví dụ ! @ # -).");
-    if (n >= MIN_LENGTH && hasRun(pw, 4)) tips.push("Tránh chuỗi lặp hoặc liên tiếp như aaaa, abcd, 1234.");
-    if (local.length >= 3 && pw.toLowerCase().indexOf(local) >= 0) tips.push("Không dùng phần tên email trong mật khẩu.");
+    if (n < MIN_LENGTH) tips.push("Use at least " + MIN_LENGTH + " characters.");
+    else if (isCommon(pw)) tips.push("This password is on the list of common passwords.");
+    if (n >= MIN_LENGTH && n < 12) tips.push("12 characters or more is much safer.");
+    if (!upper) tips.push("Add an uppercase letter.");
+    if (!lower) tips.push("Add a lowercase letter.");
+    if (!digit) tips.push("Add a digit.");
+    if (!symbol) tips.push("Add a symbol (e.g. ! @ # -).");
+    if (n >= MIN_LENGTH && hasRun(pw, 4)) tips.push("Avoid repeated or sequential runs like aaaa, abcd, 1234.");
+    if (local.length >= 3 && pw.toLowerCase().indexOf(local) >= 0) tips.push("Do not use the name part of your email in the password.");
     return { level: level, tips: tips };
   }
 

@@ -9,8 +9,8 @@
 (function (root) {
   "use strict";
   var SVG = "http://www.w3.org/2000/svg";
-  var STACK = ["CRITICAL", "HIGH", "Khác"];     // thu tu xep chong co dinh (mau di theo muc do, khong theo thu hang)
-  var STACK_CLASS = { "CRITICAL": "sev-critical", "HIGH": "sev-high", "Khác": "sev-other" };
+  var STACK = ["CRITICAL", "HIGH", "Other"];     // thu tu xep chong co dinh (mau di theo muc do, khong theo thu hang)
+  var STACK_CLASS = { "CRITICAL": "sev-critical", "HIGH": "sev-high", "Other": "sev-other" };
 
   function bucket(count, max) {
     if (!(count > 0) || !(max > 0)) return 0;
@@ -69,7 +69,7 @@
     present(stats).forEach(function (k) {
       var item = el("span", "legend-item");
       item.appendChild(el("span", "legend-swatch " + STACK_CLASS[k]));
-      item.appendChild(document.createTextNode(k === "Khác" ? "Mức khác" : k));
+      item.appendChild(document.createTextNode(k === "Other" ? "Other severity" : k));
       box.appendChild(item);
     });
   }
@@ -91,7 +91,7 @@
     var barW = Math.max(3, Math.min(slot - 2, 48)), GAP = 2;
     var base = padT + plotH, every = tickEvery(stats), layers = present(stats);
     var s = svg("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, class: "viz-svg", role: "img",
-                         "aria-label": "Số sự cố theo mức độ, tổng " + stats.total });
+                         "aria-label": "Incidents by severity, total " + stats.total });
     s.appendChild(svg("line", { x1: padL, x2: W - padR, y1: padT, y2: padT, class: "viz-grid" }));
     s.appendChild(svg("line", { x1: padL, x2: W - padR, y1: base, y2: base, class: "viz-axis" }));
     s.appendChild(svg("text", { x: padL - 6, y: padT + 4, class: "viz-tick", "text-anchor": "end" }, max));
@@ -119,7 +119,7 @@
                           slotLabel(stats, i, true)));
       }
       var hit = svg("rect", { x: padL + i * slot, y: padT, width: slot, height: plotH, class: "viz-hit" });
-      attachTip(hit, tip, slotLabel(stats, i) + " · " + stats.by_slot[i] + " sự cố" +
+      attachTip(hit, tip, slotLabel(stats, i) + " · " + stats.by_slot[i] + " incident(s)" +
                 (parts.length ? " (" + parts.join(", ") + ")" : ""));
       s.appendChild(hit);
     }
@@ -132,17 +132,17 @@
     var grid = el("div", "heat");
     grid.style.gridTemplateColumns = "minmax(120px, max-content) repeat(" + n + ", minmax(14px, 1fr)) 44px";
     grid.setAttribute("role", "table");
-    grid.setAttribute("aria-label", "Ma trận luật theo thời gian");
+    grid.setAttribute("aria-label", "Rule by time heatmap");
 
-    grid.appendChild(el("span", "heat-head", "Luật"));
+    grid.appendChild(el("span", "heat-head", "Rule"));
     for (var i = 0; i < n; i++) grid.appendChild(el("span", "heat-head heat-hour", i % every === 0 ? slotLabel(stats, i, true) : ""));
-    grid.appendChild(el("span", "heat-head heat-total", "Tổng"));
+    grid.appendChild(el("span", "heat-head heat-total", "Total"));
 
     stats.rules.forEach(function (row) {
       grid.appendChild(el("span", "heat-rule", row.rule));
       row.counts.forEach(function (count, j) {
         var cell = el("span", "heat-cell c" + bucket(count, stats.max_cell), count > 0 ? count : null);
-        var text = row.rule + " · " + slotLabel(stats, j) + " · " + count + " sự cố";
+        var text = row.rule + " · " + slotLabel(stats, j) + " · " + count + " incident(s)";
         cell.setAttribute("aria-label", text);
         attachTip(cell, tip, text);
         grid.appendChild(cell);
@@ -151,9 +151,9 @@
     });
 
     var legend = el("div", "heat-legend");
-    legend.appendChild(el("span", null, "Số sự cố: ít"));
+    legend.appendChild(el("span", null, "Incidents: few"));
     for (var b = 1; b <= 5; b++) legend.appendChild(el("span", "heat-cell c" + b));
-    legend.appendChild(el("span", null, "nhiều · ô trống = 0"));
+    legend.appendChild(el("span", null, "many · empty cell = 0"));
     box.replaceChildren(grid, legend);
   }
 
@@ -168,13 +168,13 @@
       body.appendChild(tr);
     });
     var head = document.createElement("thead"), hr = document.createElement("tr");
-    ["Luật", "Số sự cố", stats.slot_seconds >= 86400 ? "Ngày nhiều nhất" : "Giờ nhiều nhất"]
+    ["Rule", "Incidents", stats.slot_seconds >= 86400 ? "Busiest day" : "Busiest hour"]
       .forEach(function (h) { hr.appendChild(el("th", null, h)); });
     head.appendChild(hr);
     table.replaceChildren(head, body);
   }
 
-  var RANGE_TEXT = { "24h": "24 giờ qua", "7d": "7 ngày qua", "30d": "30 ngày qua" };
+  var RANGE_TEXT = { "24h": "the last 24 hours", "7d": "the last 7 days", "30d": "the last 30 days" };
   var last = null, resizeTimer = null;
   if (typeof window !== "undefined") {
     window.addEventListener("resize", function () {
@@ -188,9 +188,9 @@
   function render(stats, nodes) {
     last = { stats: stats, nodes: nodes };
     var empty = !stats.total, crit = (stats.series.CRITICAL || []).reduce(function (a, b) { return a + b; }, 0);
-    nodes.note.textContent = empty ? "Không có sự cố nào trong " + (RANGE_TEXT[stats.range] || "khoảng này") + "."
-      : "Tổng " + stats.total + " sự cố · " + crit + " CRITICAL · " + stats.rules.length + " nhóm luật" +
-        (stats.truncated ? " · chỉ tính " + stats.limit + " sự cố mới nhất" : "");
+    nodes.note.textContent = empty ? "No incidents in " + (RANGE_TEXT[stats.range] || "this range") + "."
+      : "Total " + stats.total + " incident(s) · " + crit + " CRITICAL · " + stats.rules.length + " rule group(s)" +
+        (stats.truncated ? " · only the latest " + stats.limit + " incidents counted" : "");
     nodes.hourly.hidden = nodes.matrix.hidden = nodes.legend.hidden = empty;
     if (empty) return;
     renderLegend(nodes.legend, stats);

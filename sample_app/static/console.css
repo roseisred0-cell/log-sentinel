@@ -151,3 +151,13 @@ button.more { display: block; margin: 12px auto 0; }
 button.ask-ai { margin-top: 6px; }
 /* Nhac so tai khoan cho duyet khi muc Phan quyen dang khoa */
 .pending-hint { margin: 8px 0; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--bg); border-radius: 4px; }
+
+/* The System Health. Trang thai dung bang mau trang thai co dinh + chu (khong chi dua vao mau) */
+.health-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.small-link { font-size: 13px; color: var(--accent); text-decoration: none; }
+.small-link:hover { text-decoration: underline; }
+.state { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid currentColor; }
+.state.OK { color: #0ca30c; } .state.ALARM { color: #d03b3b; } .state.INSUFFICIENT_DATA { color: var(--muted); }
+.spark { display: block; }
+.spark-inv { fill: var(--accent); fill-opacity: .55; } .spark-err { fill: #d03b3b; }
+td.err-count { color: #d03b3b; font-weight: 600; }

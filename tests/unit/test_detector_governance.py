@@ -38,6 +38,15 @@ def test_governance_events_become_high_incidents_without_blocking(det, event_typ
     assert blocked_ips(det) == []
 
 
+def test_session_ip_change_alerts_but_never_blocks_either_ip(det):
+    """Doi IP giua phien: co the la cookie bi danh cap, cung co the la admin vua doi mang -> chi canh bao."""
+    det.evaluate_webapp_log(event("SESSION_IP_CHANGED", login_ip="198.51.100.50"))
+    assert rules(det) == ["SESSION_IP_CHANGED"]
+    item = incident(det, "SESSION_IP_CHANGED")
+    assert item["severity"] == "HIGH" and item["details"]["login_ip"] == "198.51.100.50"
+    assert blocked_ips(det) == []
+
+
 def test_bootstrap_promotion_keeps_its_label_in_the_incident(det):
     det.evaluate_webapp_log(event("ADMIN_ROLE_CHANGED", action="promote", target_user="v@x.co", bootstrap=True))
     assert incident(det, "ADMIN_ROLE_CHANGED")["details"]["bootstrap"] is True

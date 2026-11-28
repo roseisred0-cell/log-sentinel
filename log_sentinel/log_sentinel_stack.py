@@ -522,6 +522,13 @@ class LogSentinelStack(Stack):
             actions=["lambda:InvokeFunction"],
             resources=[self.governance_lambda.function_arn],
         ))
+        # The System Health (chi Admin): chi DOC alarm cua stack nay va metric Lambda. GetMetricData khong ho tro
+        # gioi han theo tai nguyen (AWS yeu cau "*"); DescribeAlarms gioi han theo tien to ten alarm cua stack.
+        vm_role.add_to_policy(iam.PolicyStatement(
+            actions=["cloudwatch:DescribeAlarms"],
+            resources=[f"arn:aws:cloudwatch:{self.region}:{self.account}:alarm:{self.stack_name}-*"],
+        ))
+        vm_role.add_to_policy(iam.PolicyStatement(actions=["cloudwatch:GetMetricData"], resources=["*"]))
         self.chat_secret = None
         if self.cfg.chat_model:
             # Gia tri ban dau la chuoi ngau nhien (giu cho); chatbot tra 503 cho toi khi nguoi dung dat key that.
@@ -570,6 +577,9 @@ class LogSentinelStack(Stack):
             f"COGNITO_USER_POOL_ID={self.user_pool.user_pool_id} "
             f"COGNITO_CLIENT_ID={self.user_pool_client.user_pool_client_id} "
             f"GOVERNANCE_FUNCTION={self.governance_lambda.function_name} "
+            f"HEALTH_ALARM_PREFIX={self.stack_name}- HEALTH_DASHBOARD=LogSentinel-Overview "
+            f"HEALTH_FUNCTIONS=Detector={self.detector_lambda.function_name},"
+            f"Governance={self.governance_lambda.function_name} "
             f"{edge_env}{chat_env}"
             "bash /opt/logsentinel/app/deploy/bootstrap.sh",
         )
@@ -725,7 +735,7 @@ class LogSentinelStack(Stack):
         # 1. Detector Lambda bi loi: neu detector hong thi moi canh bao khac deu mat.
         self.detector_error_alarm = cloudwatch.Alarm(
             self, "DetectorErrorsAlarm",
-            alarm_description="Detector Lambda bao loi: he thong phat hien co the dang mu.",
+            alarm_description="The Detector Lambda reported errors: detection may be blind.",
             metric=self.detector_lambda.metric_errors(period=five_min),
             threshold=1, evaluation_periods=1,
             comparison_operator=breach, treat_missing_data=no_data,
@@ -744,7 +754,7 @@ class LogSentinelStack(Stack):
         )
         self.critical_web_alarm = cloudwatch.Alarm(
             self, "CriticalWebEventsAlarm",
-            alarm_description="Co su kien web nghiem trong (MFA bypass / SQL injection).",
+            alarm_description="Critical web event in the app log (SQL injection).",
             metric=self.critical_web_filter.metric(statistic="Sum", period=five_min),
             threshold=1, evaluation_periods=1,
             comparison_operator=breach, treat_missing_data=no_data,
@@ -763,7 +773,7 @@ class LogSentinelStack(Stack):
         )
         self.trail_tamper_alarm = cloudwatch.Alarm(
             self, "CloudTrailTamperAlarm",
-            alarm_description="CloudTrail bi tat hoac xoa (StopLogging / DeleteTrail).",
+            alarm_description="CloudTrail was stopped or deleted (StopLogging / DeleteTrail).",
             metric=self.trail_tamper_filter.metric(statistic="Sum", period=five_min),
             threshold=1, evaluation_periods=1,
             comparison_operator=breach, treat_missing_data=no_data,
@@ -775,7 +785,7 @@ class LogSentinelStack(Stack):
             # 3 lan lien tiep moi bao, de 1 lan loi mang le te khong lam phien.
             self.waf_sync_error_alarm = cloudwatch.Alarm(
                 self, "WafSyncErrorsAlarm",
-                alarm_description="Lambda dong bo IP bi khoa len WAF bao loi lien tuc.",
+                alarm_description="The Lambda that syncs blocked IPs to AWS WAF keeps failing.",
                 metric=self.waf_sync_lambda.metric_errors(period=five_min),
                 threshold=3, evaluation_periods=1,
                 comparison_operator=breach, treat_missing_data=no_data,
@@ -793,12 +803,12 @@ class LogSentinelStack(Stack):
         self.dashboard = cloudwatch.Dashboard(self, "LogSentinelDashboard", dashboard_name="LogSentinel-Overview")
         self.dashboard.add_widgets(
             cloudwatch.GraphWidget(
-                title="Su co phat hien theo muc do (EMF tu Detector)",
+                title="Incidents detected by severity (EMF from Detector)",
                 left=[incidents("CRITICAL"), incidents("HIGH")],
                 width=12
             ),
             cloudwatch.AlarmStatusWidget(
-                title="Trang thai Alarm",
+                title="Alarm status",
                 alarms=[self.detector_error_alarm, self.critical_web_alarm, self.trail_tamper_alarm],
                 width=12
             ),
@@ -811,7 +821,7 @@ class LogSentinelStack(Stack):
                 width=12
             ),
             cloudwatch.LogQueryWidget(
-                title="20 su co gan nhat",
+                title="Latest 20 incidents",
                 log_group_names=[self.detector_log_group.log_group_name],
                 query_lines=[
                     "fields @timestamp, Severity, Rule",

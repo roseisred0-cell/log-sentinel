@@ -17,7 +17,7 @@ BRUTE = {"incident_id": "INC#8", "timestamp": "2026-11-19T02:00:00Z", "rule": "B
          "details": {"client_ip": "198.51.100.77"}}
 
 
-def build(mod, env, chat):
+def build(mod, env, chat, **extra):
     import admin_governance
     import cognito_identity as cog
     clock = Clock()
@@ -36,7 +36,7 @@ def build(mod, env, chat):
     store = Store()
     app = mod.create_app(mod.load_config_from_env(env), mod.BlockList(lambda ip: None, clock=clock), store,
                          identity=identity, clock=clock, governance_store=admin_governance.MemoryGovernanceStore(),
-                         chat=chat)
+                         chat=chat, **extra)
     log_path = Path(env["APP_LOG_PATH"])
     return types.SimpleNamespace(
         client=app.test_client(), identity=identity, store=store, clock=clock,
@@ -102,7 +102,7 @@ def test_quota_and_ai_errors_map_to_status_codes_and_the_log_never_holds_the_que
     for _ in range(2):
         assert post(chat_app, "/api/chat", {"message": "cau hoi bi mat 123"}, csrf=csrf).status_code == 200
     r = post(chat_app, "/api/chat", {"message": "cau hoi bi mat 123"}, csrf=csrf)
-    assert r.status_code == 429 and "hết lượt" in r.get_json()["error"]
+    assert r.status_code == 429 and "used all" in r.get_json()["error"]
     events = [l for l in chat_app.logs() if l["event_type"] == "CHAT_QUESTION"]
     assert len(events) == 2 and "cau hoi bi mat" not in json.dumps(chat_app.logs())
 
@@ -126,7 +126,7 @@ def test_console_has_a_chat_card_that_renders_ai_text_safely():
     for element_id in ("chat-card", "chat-log", "chat-form", "chat-input", "chat-context"):
         assert f'id="{element_id}"' in html
     assert 'maxlength="1000"' in html.split('id="chat-input"')[1].split(">")[0]
-    assert '"/api/chat"' in js and "Hỏi AI" in js
+    assert '"/api/chat"' in js and "Ask AI" in js
     assert ".innerHTML" not in js and "insertAdjacentHTML" not in js   # cau tra loi cua AI chi hien bang textContent
 
 
@@ -135,5 +135,5 @@ def test_recent_incidents_table_shows_ten_rows_with_a_show_more_toggle():
     html = (root / "templates" / "console.html").read_text(encoding="utf-8")
     js = (root / "static" / "console.js").read_text(encoding="utf-8")
     assert 'id="incidents-more"' in html
-    assert "INCIDENT_PREVIEW = 10" in js and "Xem thêm" in js and "Thu gọn" in js
+    assert "INCIDENT_PREVIEW = 10" in js and "more incidents" in js and "Show less" in js
     assert 'aria-expanded' in js                                   # trinh doc man hinh biet bang dang mo hay thu gon

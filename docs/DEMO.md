@@ -10,7 +10,7 @@ Chỉ tấn công hệ thống của chính mình. Mọi lệnh PowerShell chạ
 |---|---|---|
 | SOC Console | `https://dww0e125hyfiv.cloudfront.net/console` | Output `SocConsoleUrl` |
 | Địa chỉ web (đích tấn công) | `https://dww0e125hyfiv.cloudfront.net` | Output `TargetVmAttackUrl` |
-| Máy EC2 | `i-0dc0d22dad246ff78` | Output `TargetVmInstanceId` |
+| Máy EC2 | `i-05cb5a7b07686b0eb` | Output `TargetVmInstanceId` |
 | Bot Telegram | `Logsentinel_QM3004_bot` | |
 | CloudWatch dashboard | `LogSentinel-Overview` | |
 
@@ -38,7 +38,7 @@ $URL = "https://dww0e125hyfiv.cloudfront.net"
   Thiếu `enable_edge` hoặc `static_ip` thì CDK xóa CloudFront và trả lại Elastic IP.
 - [ ] **Bật máy** nếu đang tắt, rồi đợi 1–2 phút cho dịch vụ chạy lại:
   ```powershell
-  aws ec2 start-instances --region ap-southeast-1 --instance-ids i-0dc0d22dad246ff78
+  aws ec2 start-instances --region ap-southeast-1 --instance-ids i-05cb5a7b07686b0eb
   curl.exe -s -o NUL -w "%{http_code}`n" "$URL/health"     # phải ra 200
   ```
 - [ ] **IP laptop trình bày phải nằm trong `admin_cidr`**, nếu không bạn có thể tự khóa mình. Mạng ở phòng bảo vệ thường khác mạng ở nhà, nên so lại hai địa chỉ:
@@ -66,7 +66,7 @@ Mỗi tài khoản đăng nhập ở **một trình duyệt hoặc cửa sổ �
 Tài khoản `admin` nội bộ chỉ dùng dự phòng. Mật khẩu và khóa 2FA lấy qua SSM, không cần SSH:
 
 ```powershell
-aws ssm start-session --region ap-southeast-1 --target i-0dc0d22dad246ff78
+aws ssm start-session --region ap-southeast-1 --target i-05cb5a7b07686b0eb
 # trong phiên (dấu nhắc sh-5.2$):
 sudo cat /etc/logsentinel/webapp.env
 ```
@@ -236,7 +236,7 @@ Nên quay video hoặc chụp ảnh một lần chạy thành công từ hôm tr
 - [ ] Hạ tài khoản V về Người xem nếu muốn giữ nguyên trạng thái: A bấm **Đề xuất hạ quyền**, B **Đồng ý**. Với 3 admin thì cần 2 phiếu.
 - [ ] Tắt máy để tiết kiệm (Detector, CloudTrail và cảnh báo vẫn chạy). Elastic IP vẫn tính phí khoảng 3,6 USD/tháng kể cả khi máy tắt.
   ```powershell
-  aws ec2 stop-instances --region ap-southeast-1 --instance-ids i-0dc0d22dad246ff78
+  aws ec2 stop-instances --region ap-southeast-1 --instance-ids i-05cb5a7b07686b0eb
   ```
 
 ## 5. Câu hỏi hội đồng hay hỏi

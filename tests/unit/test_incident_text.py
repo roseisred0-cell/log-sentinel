@@ -1,4 +1,4 @@
-"""Cau tieng Viet de doc cho cot Doi tuong / Chi tiet cua bang su co (static/incident-text.js).
+"""Cau tieng Anh de doc cho cot Doi tuong / Chi tiet cua bang su co (static/incident-text.js).
 
 Thiet ke chot 11/11: moi luat mot cau, du lieu goc thu vao nut "Xem du lieu goc".
 Seam 1: IncidentText.describe(incident) -> {subject, sentence}, chay bang Node.js.
@@ -36,40 +36,40 @@ def describe(rule, ip=None, actor=None, **details):
 def test_brute_force():
     d = describe("BRUTE_FORCE_DETECTED", ip="203.0.113.9", actor="admin",
                  client_ip="203.0.113.9", username="admin", attempt_count=5, window_seconds=60)
-    assert d == {"subject": "IP 203.0.113.9 · tài khoản admin",
-                 "sentence": "Đoán sai mật khẩu 5 lần trong 60 giây. IP đã bị khóa 24 giờ."}
+    assert d == {"subject": "IP 203.0.113.9 · account admin",
+                 "sentence": "Wrong password 5 times within 60 seconds. The IP was blocked for 24 hours."}
 
 
 WEB_APP = [
     (dict(rule="SLOW_BRUTE_FORCE", ip="203.0.113.9", actor="admin",
           details={"client_ip": "203.0.113.9", "username": "admin", "attempt_count": 20, "window_seconds": 3600}),
-     "IP 203.0.113.9 · tài khoản admin",
-     "Đoán sai mật khẩu 20 lần trong 1 giờ, rải đều để né luật đoán nhanh. IP đã bị khóa 24 giờ."),
+     "IP 203.0.113.9 · account admin",
+     "Wrong password 20 times within 1 hour, spread out to avoid the fast brute-force rule. The IP was blocked for 24 hours."),
     (dict(rule="ACCOUNT_UNDER_ATTACK", ip=None, actor="bob",
           details={"username": "bob", "attempt_count": 10, "window_seconds": 300, "last_ip": "198.51.100.4"}),
-     "tài khoản bob",
-     "Bị đoán sai mật khẩu 10 lần trong 5 phút từ nhiều IP khác nhau (gần nhất 198.51.100.4). "
-     "Không IP nào bị khóa tự động."),
+     "account bob",
+     "Wrong password 10 times within 5 minutes from many different IPs (latest 198.51.100.4). "
+     "No IP was blocked automatically."),
     (dict(rule="LOGIN_FAILURE_SPIKE", ip=None, actor=None,
           details={"attempt_count": 51, "window_seconds": 300, "last_ip": "198.51.100.4", "last_username": "x"}),
-     "Toàn hệ thống",
-     "51 lần đăng nhập sai trong 5 phút, từ nhiều IP vào nhiều tài khoản. Có thể đang bị thử mật khẩu hàng loạt."),
+     "Whole system",
+     "51 failed sign-ins within 5 minutes, from many IPs against many accounts. Leaked passwords may be being tried in bulk."),
     (dict(rule="SCAN_DETECTED", ip="203.0.113.7", actor=None,
           details={"client_ip": "203.0.113.7", "path": "/wp-admin/setup.php", "attempt_count": 30, "window_seconds": 60}),
      "IP 203.0.113.7",
-     "Gọi 30 đường dẫn không tồn tại trong 60 giây (gần nhất: /wp-admin/setup.php). IP đã bị khóa 24 giờ."),
+     "Requested 30 paths that do not exist within 60 seconds (latest: /wp-admin/setup.php). The IP was blocked for 24 hours."),
     (dict(rule="SQL_INJECTION", ip="203.0.113.5", actor=None,
           details={"client_ip": "203.0.113.5", "payload": "' OR 1=1 --"}),
      "IP 203.0.113.5",
-     "Chèn mã độc vào ô tìm kiếm: ' OR 1=1 --. IP đã bị khóa 24 giờ."),
+     "Malicious code injected into the search box: ' OR 1=1 --. The IP was blocked for 24 hours."),
     (dict(rule="SQL_INJECTION", ip="203.0.113.5", actor="admin' --",
           details={"client_ip": "203.0.113.5", "username": "admin' --", "payload": "admin' --", "field": "username"}),
      "IP 203.0.113.5",
-     "Chèn mã độc vào ô đăng nhập: admin' --. IP đã bị khóa 24 giờ."),
+     "Malicious code injected into the sign-in form: admin' --. The IP was blocked for 24 hours."),
     (dict(rule="MFA_BYPASS_ATTEMPT", ip="203.0.113.8", actor="a@x.co",
           details={"client_ip": "203.0.113.8", "username": "a@x.co", "otp_length": 6}),
-     "IP 203.0.113.8 · tài khoản a@x.co",
-     "Mật khẩu đúng nhưng mã OTP sai: mật khẩu có thể đã bị lộ, nên đổi ngay. IP đã bị khóa 24 giờ."),
+     "IP 203.0.113.8 · account a@x.co",
+     "Correct password but wrong OTP code: the password may have leaked, change it now. The IP was blocked for 24 hours."),
 ]
 
 
@@ -85,41 +85,41 @@ def ct(rule, **details):
 
 CLOUDTRAIL = [
     (ct("ROOT_ACCOUNT_LOGIN", user="root", ip="198.51.100.20", mfa_used="No", outcome="Success"),
-     "tài khoản root AWS",
-     "Đăng nhập AWS Console bằng tài khoản root từ IP 198.51.100.20, không dùng MFA. "
-     "Root không nên dùng hằng ngày: kiểm tra có phải bạn không."),
+     "AWS root account",
+     "AWS Console sign-in with the root account from IP 198.51.100.20 without MFA. "
+     "The root account should not be used day to day: check whether this was you."),
     (ct("ROOT_ACCOUNT_LOGIN", user="root", ip="198.51.100.20", mfa_used="Yes", outcome="Success"),
-     "tài khoản root AWS",
-     "Đăng nhập AWS Console bằng tài khoản root từ IP 198.51.100.20, có dùng MFA. "
-     "Root không nên dùng hằng ngày: kiểm tra có phải bạn không."),
+     "AWS root account",
+     "AWS Console sign-in with the root account from IP 198.51.100.20 with MFA. "
+     "The root account should not be used day to day: check whether this was you."),
     (ct("ROOT_ACCOUNT_LOGIN", user="root", ip="198.51.100.20", mfa_used="No", outcome="Failure"),
-     "tài khoản root AWS",
-     "Đăng nhập AWS Console bằng tài khoản root từ IP 198.51.100.20 thất bại. "
-     "Root không nên dùng hằng ngày: kiểm tra có phải bạn không."),
+     "AWS root account",
+     "AWS Console sign-in with the root account from IP 198.51.100.20 (failed). "
+     "The root account should not be used day to day: check whether this was you."),
     (ct("CONSOLE_LOGIN_NO_MFA", user="alice", ip="198.51.100.21"),
-     "người dùng AWS alice",
-     "Đăng nhập AWS Console thành công từ IP 198.51.100.21 mà không dùng MFA. Nên bật MFA cho người dùng này."),
+     "AWS user alice",
+     "Successful AWS Console sign-in from IP 198.51.100.21 without MFA. Turn on MFA for this user."),
     (ct("CONSOLE_BRUTE_FORCE", user="alice", ip="198.51.100.22", attempt_count=5, window_seconds=300),
-     "IP 198.51.100.22 · người dùng AWS alice",
-     "Đăng nhập AWS Console sai 5 lần trong 5 phút. Hệ thống không khóa được IP ở AWS Console."),
+     "IP 198.51.100.22 · AWS user alice",
+     "Failed AWS Console sign-in 5 times within 5 minutes. The system cannot block IPs on the AWS Console."),
     (ct("MFA_TAMPERING", action="DeactivateMFADevice", user="alice", ip="198.51.100.23"),
-     "người dùng AWS alice",
-     "Tắt thiết bị MFA từ IP 198.51.100.23."),
+     "AWS user alice",
+     "MFA device deactivated from IP 198.51.100.23."),
     (ct("MFA_TAMPERING", action="DeleteVirtualMFADevice", user="alice", ip="198.51.100.23"),
-     "người dùng AWS alice",
-     "Xóa thiết bị MFA ảo từ IP 198.51.100.23."),
+     "AWS user alice",
+     "Virtual MFA device deleted from IP 198.51.100.23."),
     (ct("CLOUDTRAIL_TAMPERING", action="StopLogging", user="mallory", ip="198.51.100.24"),
-     "người dùng AWS mallory",
-     "Dừng ghi nhật ký kiểm toán (CloudTrail) từ IP 198.51.100.24: dấu hiệu xóa dấu vết."),
+     "AWS user mallory",
+     "Stopped the audit log (CloudTrail) from IP 198.51.100.24: a sign of covering tracks."),
     (ct("CLOUDTRAIL_TAMPERING", action="DeleteTrail", user="mallory", ip="198.51.100.24"),
-     "người dùng AWS mallory",
-     "Xóa nhật ký kiểm toán (CloudTrail) từ IP 198.51.100.24: dấu hiệu xóa dấu vết."),
+     "AWS user mallory",
+     "Deleted the audit log (CloudTrail) from IP 198.51.100.24: a sign of covering tracks."),
     (ct("KMS_KEY_TAMPERING", action="ScheduleKeyDeletion", user="mallory", ip="198.51.100.25", key_id="k-123"),
-     "khóa KMS k-123",
-     "mallory hẹn xóa khóa mã hóa từ IP 198.51.100.25. Khẩn cấp: mất khóa là mất toàn bộ log và bảng sự cố."),
+     "KMS key k-123",
+     "mallory scheduled deletion of the encryption key from IP 198.51.100.25. Urgent: losing the key means losing all logs and the incident table."),
     (ct("KMS_KEY_TAMPERING", action="DisableKey", user="mallory", ip="198.51.100.25", key_id="k-123"),
-     "khóa KMS k-123",
-     "mallory vô hiệu hóa khóa mã hóa từ IP 198.51.100.25. Khẩn cấp: mất khóa là mất toàn bộ log và bảng sự cố."),
+     "KMS key k-123",
+     "mallory disabled the encryption key from IP 198.51.100.25. Urgent: losing the key means losing all logs and the incident table."),
 ]
 
 
@@ -136,30 +136,30 @@ def iam(rule, action, **extra):
 
 IAM = [
     (iam("IAM_ACCESS_KEY_CREATED", "CreateAccessKey", target_user="bob"),
-     "người dùng AWS bob", "alice tạo khóa truy cập (access key) cho người dùng AWS bob."),
+     "AWS user bob", "alice created an access key for AWS user bob."),
     (iam("IAM_ACCESS_KEY_CREATED", "CreateAccessKey"),
-     "người dùng AWS alice", "alice tạo khóa truy cập (access key) cho chính mình."),
+     "AWS user alice", "alice created an access key for themselves."),
     (iam("IAM_POLICY_ATTACHED", "AttachRolePolicy", target_role="DeployRole",
          policy_arn="arn:aws:iam::aws:policy/AdministratorAccess", via_service="cloudformation.amazonaws.com"),
      "role DeployRole",
-     "alice gắn policy AdministratorAccess cho role DeployRole. Đây là quyền cao nhất. "
-     "Thực hiện qua CloudFormation (cdk deploy)."),
+     "alice attached policy AdministratorAccess to role DeployRole. This is the highest privilege. "
+     "Done through CloudFormation (cdk deploy)."),
     (iam("IAM_POLICY_ATTACHED", "AttachUserPolicy", target_user="bob",
          policy_arn="arn:aws:iam::123456789012:policy/ReadLogs", error_code="AccessDenied"),
-     "người dùng AWS bob", "alice gắn policy ReadLogs cho người dùng AWS bob. Bị từ chối (AccessDenied)."),
+     "AWS user bob", "alice attached policy ReadLogs to AWS user bob. Denied (AccessDenied)."),
     (iam("IAM_INLINE_POLICY_PUT", "PutGroupPolicy", target_group="ops", policy_name="AllowAll"),
-     "nhóm ops", "alice ghi inline policy AllowAll cho nhóm ops."),
+     "group ops", "alice put inline policy AllowAll on group ops."),
     (iam("IAM_POLICY_VERSION_CREATED", "CreatePolicyVersion", policy_arn="arn:aws:iam::123456789012:policy/AppPolicy"),
-     "policy AppPolicy", "alice sửa nội dung policy AppPolicy (tạo phiên bản mới)."),
+     "policy AppPolicy", "alice changed the content of policy AppPolicy (new version)."),
     (iam("IAM_TRUST_POLICY_CHANGED", "UpdateAssumeRolePolicy", target_role="DeployRole"),
      "role DeployRole",
-     "alice sửa trust policy của role DeployRole: danh sách ai được mượn quyền của role này có thể đã đổi."),
+     "alice changed the trust policy of role DeployRole: who can assume this role may have changed."),
     (iam("IAM_LOGIN_PROFILE_CHANGED", "CreateLoginProfile", target_user="bob"),
-     "người dùng AWS bob", "alice đặt mật khẩu AWS Console cho người dùng AWS bob."),
+     "AWS user bob", "alice set an AWS Console password for AWS user bob."),
     (iam("IAM_LOGIN_PROFILE_CHANGED", "UpdateLoginProfile", target_user="bob"),
-     "người dùng AWS bob", "alice đổi mật khẩu AWS Console của người dùng AWS bob."),
+     "AWS user bob", "alice changed the AWS Console password of AWS user bob."),
     (iam("IAM_USER_ADDED_TO_GROUP", "AddUserToGroup", target_user="bob", target_group="admins"),
-     "nhóm admins", "alice thêm người dùng AWS bob vào nhóm admins."),
+     "group admins", "alice added AWS user bob to group admins."),
 ]
 
 
@@ -176,28 +176,28 @@ def gov(rule, **details):
 
 GOVERNANCE = [
     (gov("ROLE_REQUEST_CREATED", action="promote", target_user="v@x.co", request_id="r1"),
-     "v@x.co", "a@x.co đề xuất nâng v@x.co lên Quản trị. Các quản trị viên khác vào mục Phân quyền để bỏ phiếu."),
+     "v@x.co", "a@x.co proposed to promote v@x.co to Admin. Other administrators should vote in the Roles section."),
     (gov("ROLE_REQUEST_CREATED", action="disable", target_user="v@x.co", request_id="r1"),
-     "v@x.co", "a@x.co đề xuất vô hiệu hóa tài khoản v@x.co. Các quản trị viên khác vào mục Phân quyền để bỏ phiếu."),
+     "v@x.co", "a@x.co proposed to disable the account v@x.co. Other administrators should vote in the Roles section."),
     (gov("ADMIN_ROLE_CHANGED", action="promote", target_user="v@x.co", bootstrap=False,
          approvers=["cognito:a@x.co", "cognito:b@x.co"]),
-     "v@x.co", "v@x.co được nâng lên Quản trị, với sự đồng ý của a@x.co, b@x.co."),
+     "v@x.co", "v@x.co was promoted to Admin, approved by a@x.co, b@x.co."),
     (gov("ADMIN_ROLE_CHANGED", action="demote", target_user="c@x.co", bootstrap=False,
          approvers=["cognito:a@x.co", "cognito:b@x.co"]),
-     "c@x.co", "c@x.co bị hạ xuống Người xem, với sự đồng ý của a@x.co, b@x.co."),
+     "c@x.co", "c@x.co was demoted to Viewer, approved by a@x.co, b@x.co."),
     (gov("ADMIN_ROLE_CHANGED", username="admin", action="promote", target_user="v@x.co", bootstrap=True,
          approvers=["local:admin"]),
-     "v@x.co", "v@x.co được nâng lên Quản trị bởi admin nội bộ (chế độ khởi tạo)."),
+     "v@x.co", "v@x.co was promoted to Admin by the internal admin (bootstrap mode)."),
     (gov("USER_DISABLED", action="disable", target_user="v@x.co", approvers=["cognito:a@x.co", "cognito:b@x.co"]),
-     "v@x.co", "Tài khoản v@x.co bị vô hiệu hóa, với sự đồng ý của a@x.co, b@x.co."),
+     "v@x.co", "Account v@x.co was disabled, approved by a@x.co, b@x.co."),
     (gov("ROLE_CHANGE_FAILED", action="promote", target_user="v@x.co", request_id="r1"),
-     "v@x.co", "Đủ phiếu để nâng v@x.co lên Quản trị nhưng Cognito lỗi nên chưa thực hiện. "
-               "Bấm Đồng ý lại trên yêu cầu đó để thử lại."),
+     "v@x.co", "Enough votes to promote v@x.co to Admin, but Cognito failed so it was not applied. "
+               "Click Approve on that request again to retry."),
     (gov("ADMIN_PIN_LOCKED", auth="cognito"),
-     "tài khoản a@x.co", "Nhập sai PIN mục Phân quyền 5 lần, PIN bị khóa 15 phút. "
-                         "Nếu không phải chủ tài khoản: phiên đăng nhập có thể đã bị chiếm."),
+     "account a@x.co", "Wrong Roles PIN entered 5 times; the PIN is locked for 15 minutes. "
+                         "If this was not the account owner, the session may have been hijacked."),
     (gov("ADMIN_PIN_RESET", target_user="b@x.co"),
-     "b@x.co", "a@x.co đặt lại PIN mục Phân quyền của b@x.co."),
+     "b@x.co", "a@x.co reset the Roles PIN of b@x.co."),
 ]
 
 
@@ -209,8 +209,8 @@ def test_governance_events(incident, subject, sentence):
 
 def test_unknown_rule_falls_back_without_hiding_the_data():
     d = describe("SOMETHING_NEW", ip="203.0.113.50", actor="eve", foo="bar")
-    assert d == {"subject": "IP 203.0.113.50 · tài khoản eve",
-                 "sentence": "Chưa có mô tả cho luật này. Bấm “Xem dữ liệu gốc” để xem chi tiết."}
+    assert d == {"subject": "IP 203.0.113.50 · account eve",
+                 "sentence": "No description for this rule yet. Click “Show raw data” for details."}
 
 
 def rule_names():
@@ -257,4 +257,4 @@ def test_every_detector_rule_has_a_readable_sentence():
 
 def test_long_payload_is_shortened():
     d = describe("SQL_INJECTION", ip="203.0.113.5", client_ip="203.0.113.5", payload="UNION SELECT " + "x" * 300)
-    assert d["sentence"] == "Chèn mã độc vào ô tìm kiếm: UNION SELECT " + "x" * 67 + "…. IP đã bị khóa 24 giờ."
+    assert d["sentence"] == "Malicious code injected into the search box: UNION SELECT " + "x" * 67 + "…. The IP was blocked for 24 hours."

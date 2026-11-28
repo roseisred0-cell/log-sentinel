@@ -94,3 +94,24 @@ def test_spike_fires_only_when_the_total_goes_over_50(det):
     assert "LOGIN_FAILURE_SPIKE" not in rules(det)
     det.evaluate_webapp_log(failed_login("203.0.99.8", "user99"))
     assert rules(det) == ["LOGIN_FAILURE_SPIKE"]
+
+
+# ---------------------------------------------------------- sai ma OTP (2FA)
+def mfa_failed(ip, username="a@x.co"):
+    return json.dumps({"event_type": "MFA_FAILED", "client_ip": ip, "username": username, "status_code": 403})
+
+
+def test_a_few_wrong_otp_codes_are_not_an_attack(det):
+    """Go nham ma Authenticator 1-4 lan la chuyen binh thuong: khong canh bao, khong khoa IP."""
+    for _ in range(4):
+        det.evaluate_webapp_log(mfa_failed("203.0.113.30"))
+    assert rules(det) == [] and blocked_ips(det) == []
+
+
+def test_fifth_wrong_otp_within_a_minute_raises_one_critical_alert_and_blocks(det):
+    for _ in range(12):
+        det.evaluate_webapp_log(mfa_failed("203.0.113.31"))
+    assert rules(det).count("MFA_BYPASS_ATTEMPT") == 1 and blocked_ips(det) == ["203.0.113.31"]
+    item = incident(det, "MFA_BYPASS_ATTEMPT")
+    assert item["severity"] == "CRITICAL"
+    assert item["details"]["attempt_count"] == 5 and item["details"]["window_seconds"] == 60
