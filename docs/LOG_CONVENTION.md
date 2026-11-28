@@ -38,7 +38,8 @@
 |---|---|---|---|
 | `FAILED_LOGIN` | Sai user/mật khẩu, hoặc sai setup token | Đếm nguyên tử theo IP, cửa sổ 60s | Đúng lần thứ 5 → `BRUTE_FORCE_DETECTED` (HIGH) + khóa 24h, 1 lần/cửa sổ |
 | `MFA_REQUIRED` | Đúng mật khẩu, thiếu OTP | Bỏ qua | — |
-| `MFA_BYPASS_ATTEMPT` | Đúng mật khẩu, sai OTP | CRITICAL | Khóa 24h |
+| `MFA_FAILED` | Đúng mật khẩu, sai OTP (mỗi lần; không ghi mã OTP) | Đếm theo IP, cửa sổ 60 giây | Lần thứ 5 → `MFA_BYPASS_ATTEMPT` (CRITICAL) + khóa 24h. Web app tự chặn tạm ở cùng ngưỡng |
+| `MFA_BYPASS_ATTEMPT` | (Detector tự sinh khi đủ 5 `MFA_FAILED`; vẫn nhận sự kiện trực tiếp từ `attack_sim.py logs`) | CRITICAL | Khóa 24h |
 | `SQL_INJECTION` | `/search` khớp mẫu SQLi / path traversal | CRITICAL | Khóa 24h |
 | `LOGIN_SUCCESS` | Đăng nhập đủ 2 lớp | Bỏ qua | — |
 | `NOT_FOUND` | Request tới đường dẫn không tồn tại (404). `path` là đường dẫn được gọi | Đếm theo IP, cửa sổ 60 giây | Đúng lần thứ 30 → `SCAN_DETECTED` (HIGH) + khóa 24 giờ. Web app tự chặn tạm ở cùng ngưỡng |
@@ -68,7 +69,7 @@ Mọi dòng log là JSON thuần ASCII (`\uXXXX` cho ký tự khác): dữ liệ
 
 `FAILED_LOGIN` cũng được đếm trên **toàn hệ thống** (hơn 50 lần / 5 phút, bất kể IP hay tài khoản, kể cả IP đã bị khóa) → `LOGIN_FAILURE_SPIKE` (HIGH, không khóa IP).
 
-Đăng nhập tài khoản Cognito dùng lại đúng các sự kiện ở trên: sai mật khẩu → `FAILED_LOGIN` (tính vào luật brute-force), đúng mật khẩu nhưng sai mã TOTP → `MFA_BYPASS_ATTEMPT` (CRITICAL, khóa IP). `LOGIN_SUCCESS` có thêm trường `auth` (`local` | `cognito`) và `role` (`admin` | `viewer` | `pending`).
+Đăng nhập tài khoản Cognito dùng lại đúng các sự kiện ở trên: sai mật khẩu → `FAILED_LOGIN` (tính vào luật brute-force), đúng mật khẩu nhưng sai mã TOTP → `MFA_FAILED` (5 lần / 60 giây → `MFA_BYPASS_ATTEMPT` CRITICAL, khóa IP). `LOGIN_SUCCESS` có thêm trường `auth` (`local` | `cognito`) và `role` (`admin` | `viewer` | `pending`).
 
 ## Khóa DynamoDB `IncidentTable` (PK `incident_id`, SK `timestamp`)
 

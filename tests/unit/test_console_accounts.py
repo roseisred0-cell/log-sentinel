@@ -335,14 +335,19 @@ def test_mfa_login_has_no_session_until_otp_is_verified(acct):
     assert get(acct, "/api/overview").status_code == 200
 
 
-def test_wrong_otp_is_critical_and_blocks_the_ip_like_admin_flow(acct):
+def test_wrong_otp_is_logged_but_only_the_fifth_within_a_minute_blocks_the_ip(acct):
+    """Go nham ma Authenticator la chuyen thuong: 4 lan sai van thu tiep duoc, lan thu 5 trong 60s moi bi chan."""
     acct.identity.add("a@x.co", mfa=True, role="viewer")
     post(acct, "/auth/login", {"email": "a@x.co", "password": STRONG})
-    r = post(acct, "/auth/mfa", {"code": "000000"})
-    entry = acct.logs()[-1]
-    assert r.status_code == 403 and entry["event_type"] == "MFA_BYPASS_ATTEMPT" and entry["severity"] == "CRITICAL"
-    assert "000000" not in json.dumps(entry)
-    assert get(acct, "/health").status_code == 403  # IP bi khoa ngay
+    for _ in range(4):
+        r = post(acct, "/auth/mfa", {"code": "000000"})
+        assert r.status_code == 403 and r.get_json()["error"] == "invalid_otp"
+        entry = acct.logs()[-1]
+        assert entry["event_type"] == "MFA_FAILED" and "severity" not in entry
+        assert "000000" not in json.dumps(entry)
+    assert get(acct, "/health").status_code == 200          # chua bi chan sau 4 lan sai
+    post(acct, "/auth/mfa", {"code": "000000"})
+    assert get(acct, "/health").status_code == 403          # lan sai thu 5 -> chan tai cho
 
 
 def test_mfa_without_pending_login_or_after_expiry_is_401(acct):

@@ -286,6 +286,8 @@ def test_ready_made_athena_queries_cover_the_report_and_use_partitions(template)
     text = " ".join(q["QueryString"] for q in queries)
     for topic in ("ConsoleLogin", "errorcode", "sourceipaddress", "iam.amazonaws.com"):
         assert topic in text
+    # ten tieng Anh, khop huong dan workshop (5.7: Saved queries -> "Recent IAM changes")
+    assert "LogSentinel - Recent IAM changes" in {q["Name"] for q in queries}
 
 
 def test_analyst_policy_can_query_but_cannot_change_or_delete_evidence(template):

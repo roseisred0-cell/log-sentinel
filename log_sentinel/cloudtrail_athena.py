@@ -98,29 +98,29 @@ _LAST_7_DAYS = "day >= date_format(current_date - interval '7' day, '%Y/%m/%d')"
 _LAST_30_DAYS = "day >= date_format(current_date - interval '30' day, '%Y/%m/%d')"
 
 NAMED_QUERIES = (
-    ("LogSentinel - Su kien theo ngay (30 ngay)",
-     "So su kien CloudTrail moi ngay: ve bieu do xu huong cho bao cao",
-     f"SELECT day, count(*) AS so_su_kien, count(DISTINCT sourceipaddress) AS so_ip "
+    ("LogSentinel - Events per day (30 days)",
+     "Number of CloudTrail events per day: trend chart for the report",
+     f"SELECT day, count(*) AS events, count(DISTINCT sourceipaddress) AS distinct_ips "
      f"FROM cloudtrail_logs WHERE {_LAST_30_DAYS} GROUP BY day ORDER BY day"),
-    ("LogSentinel - Top hanh dong (7 ngay)",
-     "Dich vu va hanh dong duoc goi nhieu nhat",
-     f"SELECT eventsource, eventname, count(*) AS so_lan "
-     f"FROM cloudtrail_logs WHERE {_LAST_7_DAYS} GROUP BY eventsource, eventname ORDER BY so_lan DESC LIMIT 50"),
-    ("LogSentinel - Dang nhap Console that bai theo IP (7 ngay)",
-     "Dau hieu do mat khau AWS Console",
-     f"SELECT sourceipaddress, useridentity.username AS tai_khoan, count(*) AS so_lan_sai, max(eventtime) AS lan_cuoi "
+    ("LogSentinel - Top actions (7 days)",
+     "Most frequently called services and actions",
+     f"SELECT eventsource, eventname, count(*) AS calls "
+     f"FROM cloudtrail_logs WHERE {_LAST_7_DAYS} GROUP BY eventsource, eventname ORDER BY calls DESC LIMIT 50"),
+    ("LogSentinel - Failed Console sign-ins by IP (7 days)",
+     "Signs of AWS Console password guessing",
+     f"SELECT sourceipaddress, useridentity.username AS username, count(*) AS failures, max(eventtime) AS last_seen "
      f"FROM cloudtrail_logs WHERE {_LAST_7_DAYS} AND eventname = 'ConsoleLogin' "
      f"AND json_extract_scalar(responseelements, '$.ConsoleLogin') = 'Failure' "
-     f"GROUP BY sourceipaddress, useridentity.username ORDER BY so_lan_sai DESC"),
-    ("LogSentinel - Thay doi IAM (7 ngay)",
-     "Moi thao tac ghi len IAM: ai, tu dau, co bi tu choi khong",
-     f"SELECT eventtime, eventname, useridentity.arn AS nguoi_thuc_hien, sourceipaddress, errorcode "
+     f"GROUP BY sourceipaddress, useridentity.username ORDER BY failures DESC"),
+    ("LogSentinel - Recent IAM changes",
+     "Every IAM write action in the last 7 days: who, from where, and whether it was denied",
+     f"SELECT eventtime, eventname, useridentity.arn AS actor, sourceipaddress, errorcode "
      f"FROM cloudtrail_logs WHERE {_LAST_7_DAYS} AND eventsource = 'iam.amazonaws.com' AND readonly = 'false' "
      f"ORDER BY eventtime DESC LIMIT 200"),
-    ("LogSentinel - Loi goi API bi tu choi (7 ngay)",
-     "Ai dang thu lam viec minh khong co quyen",
-     f"SELECT useridentity.arn AS nguoi_thuc_hien, eventsource, eventname, errorcode, count(*) AS so_lan "
+    ("LogSentinel - Denied API calls (7 days)",
+     "Who is trying to do things they are not allowed to",
+     f"SELECT useridentity.arn AS actor, eventsource, eventname, errorcode, count(*) AS calls "
      f"FROM cloudtrail_logs WHERE {_LAST_7_DAYS} "
      f"AND errorcode IN ('AccessDenied', 'UnauthorizedOperation', 'Client.UnauthorizedOperation') "
-     f"GROUP BY useridentity.arn, eventsource, eventname, errorcode ORDER BY so_lan DESC LIMIT 100"),
+     f"GROUP BY useridentity.arn, eventsource, eventname, errorcode ORDER BY calls DESC LIMIT 100"),
 )

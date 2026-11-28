@@ -7,8 +7,8 @@ Tinh tren may chu de trinh duyet chi nhan vai chuc con so (khong tai ca nghin ba
 """
 from datetime import datetime
 
-OTHER = "Khác"
-UNKNOWN = "(không rõ)"
+OTHER = "Other"
+UNKNOWN = "(unknown)"
 SEVERITIES = ("CRITICAL", "HIGH")   # muc Detector sinh ra; muc khac (neu co) gop vao "Khac"
 
 

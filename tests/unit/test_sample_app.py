@@ -233,11 +233,15 @@ def test_wrong_password_logged_as_failed_login(harness):
     assert harness.logs()[-1]["event_type"] == "FAILED_LOGIN"
 
 
-def test_right_password_wrong_otp_is_critical_and_otp_not_logged(harness):
-    r = _login(harness, "198.51.100.9", username="admin", password="S3cure-Pass", otp="000000")
-    assert r.status_code == 403
-    entry = harness.logs()[-1]
-    assert entry["event_type"] == "MFA_BYPASS_ATTEMPT" and "000000" not in json.dumps(entry)
+def test_right_password_wrong_otp_is_logged_and_only_the_fifth_blocks(harness):
+    for _ in range(4):
+        r = _login(harness, "198.51.100.9", username="admin", password="S3cure-Pass", otp="000000")
+        assert r.status_code == 403
+        entry = harness.logs()[-1]
+        assert entry["event_type"] == "MFA_FAILED" and "000000" not in json.dumps(entry)
+    assert harness.client.get("/health", **via_nginx("198.51.100.9")).status_code == 200
+    _login(harness, "198.51.100.9", username="admin", password="S3cure-Pass", otp="000000")
+    assert harness.client.get("/health", **via_nginx("198.51.100.9")).status_code == 403
 
 
 def test_full_login_success(harness):
@@ -333,6 +337,19 @@ def test_logout_ends_session(harness):
     csrf = _sign_in(harness)
     assert _post(harness, "/api/logout", csrf=csrf).status_code == 200
     assert harness.client.get("/api/overview", **via_nginx(ADMIN_IP)).status_code == 401
+
+
+def test_session_from_a_different_ip_is_sent_back_to_login(harness):
+    _sign_in(harness)
+    assert harness.client.get("/api/session", **via_nginx("203.0.113.77")).status_code == 401
+
+
+def test_ip_change_is_logged_with_both_addresses(harness):
+    _sign_in(harness)
+    harness.client.get("/api/session", **via_nginx("203.0.113.77"))
+    entry = harness.logs()[-1]
+    assert entry["event_type"] == "SESSION_IP_CHANGED" and entry["username"] == "admin"
+    assert entry["login_ip"] == ADMIN_IP and entry["client_ip"] == "203.0.113.77"
 
 
 def test_store_failure_returns_502_not_stacktrace(harness):

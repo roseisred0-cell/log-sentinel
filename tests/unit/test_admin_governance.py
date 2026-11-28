@@ -1,6 +1,5 @@
 """Phan quyen admin (muc "Phan quyen" cua SOC Console): PIN rieng, bo phieu nang/ha/vo hieu hoa, che do khoi tao.
 
-Quyet dinh thiet ke: docs/NHAT_KY.md, muc "Phan quyen admin".
 Seam A: HTTP API cua web app (Cognito gia + store RAM).
 """
 import pytest
@@ -679,4 +678,4 @@ def test_locked_section_tells_the_admin_how_many_accounts_are_waiting(acct):
     root = Path(__file__).resolve().parents[2] / "sample_app"
     assert 'id="gov-pending-hint"' in (root / "templates" / "console.html").read_text(encoding="utf-8")
     js = (root / "static" / "console.js").read_text(encoding="utf-8")
-    assert "đang chờ duyệt" in js and "gov-pending-hint" in js
+    assert "waiting for approval" in js and "gov-pending-hint" in js

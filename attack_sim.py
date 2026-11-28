@@ -46,9 +46,9 @@ def run_logs(ip: str) -> None:
     base = int(time.time() * 1000)
     client.put_log_events(logGroupName=LOG_GROUP, logStreamName=stream, logEvents=[
         {"timestamp": base + i, "message": json.dumps(e)} for i, e in enumerate(events)])
-    print(f"[+] Da bom {len(events)} su kien vao {LOG_GROUP}/{stream}.")
-    print("    Ky vong: 1 BRUTE_FORCE_DETECTED (khong phai 2), 1 SQL_INJECTION, 1 MFA_BYPASS_ATTEMPT,")
-    print(f"    va item BLOCKED_IP#{ip} / ACTIVE trong IncidentTable.")
+    print(f"[+] Sent {len(events)} events to {LOG_GROUP}/{stream}.")
+    print("    Expected: 1 BRUTE_FORCE_DETECTED (not 2), 1 SQL_INJECTION, 1 MFA_BYPASS_ATTEMPT,")
+    print(f"    and the item BLOCKED_IP#{ip} / ACTIVE in IncidentTable.")
 
 
 # ------------------------------------------------------------ che do http
@@ -69,20 +69,20 @@ def run_http(target: str, insecure: bool) -> None:
         ctx.verify_mode = ssl.CERT_NONE
     target = target.rstrip("/")
 
-    print("[1] Brute-force: 6 lan sai mat khau (cach nhau 0.3s, duoi nguong rate-limit Nginx)")
+    print("[1] Brute force: 6 wrong passwords (0.3 s apart, below the Nginx rate limit)")
     for i in range(6):
         code = _request(f"{target}/login", ctx, {"username": "admin", "password": f"wrong{i}"})
-        print(f"    lan {i + 1}: HTTP {code}")
+        print(f"    attempt {i + 1}: HTTP {code}")
         time.sleep(0.3)
 
-    print("[2] Cho Detector khoa IP (toi da ~20s)...")
+    print("[2] Waiting for the Detector to block the IP (up to ~20 s)...")
     for _ in range(10):
         time.sleep(2)
         code = _request(f"{target}/health", ctx)
         if code == 403:
             print("    [OK] HTTP 403 - Access Denied by SOAR Active Defense")
             return
-    print("    [!] Chua bi khoa. Kiem tra log /logsentinel/detector va CloudWatch Agent tren EC2.")
+    print("    [!] Not blocked yet. Check the /logsentinel/detector log and the CloudWatch Agent on EC2.")
     sys.exit(1)
 
 

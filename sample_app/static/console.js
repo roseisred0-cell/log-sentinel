@@ -3,7 +3,7 @@
 (function () {
   "use strict";
   var REFRESH_MS = 15000;
-  var ROLE_LABEL = { admin: "Quản trị", viewer: "Người xem", pending: "Chờ duyệt" };
+  var ROLE_LABEL = { admin: "Admin", viewer: "Viewer", pending: "Pending" };
   var csrf = "", timer = null, lastData = null, role = "", authKind = "local", mfaSetupRequired = false;
   var cfg = { cognito: false, chat: false, min_password_level: 2 };
   // Bang Su co gan day: mac dinh chi hien 10 dong moi nhat, bam "Xem them" de mo het (giu trang thai khi tu lam moi).
@@ -40,12 +40,12 @@
 
   function localTime(iso) {
     var d = new Date(iso);
-    return isNaN(d) ? iso : d.toLocaleString("vi-VN");
+    return isNaN(d) ? iso : d.toLocaleString("en-GB");
   }
 
   function remaining(expiresAt, now) {
     var s = Math.max(0, expiresAt - now), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-    return h + " giờ " + m + " phút";
+    return h + "h " + m + "m";
   }
 
   // Cot Chi tiet: cau tieng Viet de doc (incident-text.js) + nut "Xem du lieu goc" mo JSON day du.
@@ -57,7 +57,7 @@
     td.appendChild(p);
     var box = document.createElement("details"), summary = document.createElement("summary");
     var pre = document.createElement("pre");
-    summary.textContent = "Xem dữ liệu gốc";
+    summary.textContent = "Show raw data";
     pre.textContent = JSON.stringify(incident.details || {}, null, 2);
     box.appendChild(summary);
     box.appendChild(pre);
@@ -95,7 +95,7 @@
       var details = detailsCell(i, text.sentence);
       if (cfg.chat) {   // nut nam trong o Chi tiet (khong them cot: bang da rong)
         var ask = document.createElement("button");
-        ask.type = "button"; ask.className = "small ask-ai"; ask.textContent = "Hỏi AI";
+        ask.type = "button"; ask.className = "small ask-ai"; ask.textContent = "Ask AI";
         ask.addEventListener("click", function () { chatAbout(i); });
         details.appendChild(ask);
       }
@@ -106,8 +106,8 @@
     var more = $("incidents-more");
     more.hidden = hiddenCount <= 0;
     more.setAttribute("aria-expanded", String(incidentsExpanded));
-    more.textContent = incidentsExpanded ? "Thu gọn (chỉ hiện " + INCIDENT_PREVIEW + " sự cố mới nhất)"
-                                         : "Xem thêm " + hiddenCount + " sự cố";
+    more.textContent = incidentsExpanded ? "Show less (latest " + INCIDENT_PREVIEW + " incidents only)"
+                                         : "Show " + hiddenCount + " more incidents";
 
     var bb = $("blocks");
     bb.replaceChildren();
@@ -120,7 +120,7 @@
       var td = document.createElement("td");
       if (role === "admin") {  // nguoi xem chi doc, khong go khoa
         var btn = document.createElement("button");
-        btn.type = "button"; btn.className = "small"; btn.textContent = "Gỡ khóa";
+        btn.type = "button"; btn.className = "small"; btn.textContent = "Unblock";
         btn.addEventListener("click", function () { unblock(b.ip, btn); });
         td.appendChild(btn);
       }
@@ -128,24 +128,24 @@
       bb.appendChild(tr);
     });
     $("blocks-empty").hidden = data.blocks.length > 0;
-    $("refreshed").textContent = "Cập nhật lúc " + new Date().toLocaleTimeString("vi-VN") + " · tự làm mới mỗi 15 giây";
+    $("refreshed").textContent = "Updated at " + new Date().toLocaleTimeString("en-GB") + " · refreshes every 15 seconds";
   }
 
   function load() {
     if (!canViewData()) return Promise.resolve();
     return api("/api/overview").then(function (r) {
       if (r.status === 401) return showLogin();
-      if (r.status !== 200) { $("app-error").textContent = r.body.error || "Không tải được dữ liệu."; return; }
+      if (r.status !== 200) { $("app-error").textContent = r.body.error || "Could not load data."; return; }
       $("app-error").textContent = "";
       render(r.body);
-    }).catch(function () { $("app-error").textContent = "Mất kết nối tới máy chủ."; });
+    }).catch(function () { $("app-error").textContent = "Lost connection to the server."; });
   }
 
   function unblock(ip, btn) {
-    if (!window.confirm("Gỡ khóa IP " + ip + "?")) return;
+    if (!window.confirm("Unblock IP " + ip + "?")) return;
     btn.disabled = true;
     post("/api/unblock", { ip: ip }).then(function (r) {
-      if (r.status !== 200) $("app-error").textContent = r.body.error || "Gỡ khóa thất bại.";
+      if (r.status !== 200) $("app-error").textContent = r.body.error || "Unblock failed.";
       return load();
     });
   }
@@ -168,6 +168,7 @@
     clearInterval(timer);
     clearInterval(govClock);
     clearInterval(statsTimer);
+    clearInterval(healthTimer);
     role = ""; csrf = ""; mfaSetupRequired = false;
     $("app-view").hidden = true; $("userbox").hidden = true; $("login-view").hidden = false;
     showPanel("login");
@@ -195,6 +196,10 @@
 
     clearInterval(timer);
     clearInterval(statsTimer);
+    clearInterval(healthTimer);
+    var showHealth = role === "admin" && !mfaSetupRequired;   // thong tin van hanh: chi Admin
+    $("health-card").hidden = !showHealth;
+    if (showHealth) { loadHealth(); healthTimer = setInterval(loadHealth, HEALTH_MS); }
     if (canViewData()) {
       load(); timer = setInterval(load, REFRESH_MS);
       selectRange(statsRange);
@@ -220,10 +225,10 @@
     var user = $("login-user");
     if (!cfg.cognito) {
       if (!user.value) user.value = "admin";
-      $("login-hint").textContent = "Dùng tài khoản quản trị và mã 6 số trong ứng dụng Authenticator.";
+      $("login-hint").textContent = "Use the admin account and the 6-digit code from your Authenticator app.";
     } else {
-      user.placeholder = "email hoặc admin";
-      $("login-hint").textContent = "Đăng nhập bằng email đã đăng ký. Tài khoản nội bộ “admin” cần thêm mã OTP.";
+      user.placeholder = "email or admin";
+      $("login-hint").textContent = "Sign in with your registered email. The internal “admin” account also needs an OTP code.";
     }
     $("forgot-link").hidden = !cfg.cognito;
     updateOtpField();
@@ -253,16 +258,16 @@
     request.then(function (r) {
       if (r.status === 200 && r.body.mfa_required) { form.password.value = ""; $("mfa-form").reset(); return showPanel("mfa"); }
       if (r.status === 200) { form.reset(); return start(); }
-      var msg = { 401: "Sai tài khoản hoặc mật khẩu.", 403: "Mã OTP không hợp lệ, hoặc IP của bạn đã bị khóa.",
-                  429: "Thao tác quá nhanh, thử lại sau vài giây." };
+      var msg = { 401: "Wrong username or password.", 403: "Invalid OTP code, or your IP has been blocked.",
+                  429: "Too many attempts. Try again in a few seconds." };
       if (r.body.error === "not_confirmed") {
         pendingEmail = name.toLowerCase();
         $("confirm-email").textContent = pendingEmail;
-        $("confirm-error").textContent = "Email chưa được xác nhận. Nhập mã đã gửi tới hộp thư của bạn.";
+        $("confirm-error").textContent = "Your email is not confirmed yet. Enter the code sent to your inbox.";
         return showPanel("confirm");
       }
-      errBox.textContent = msg[r.status] || "Đăng nhập thất bại (" + r.status + ").";
-    }).catch(function () { errBox.textContent = "Mất kết nối tới máy chủ."; });
+      errBox.textContent = msg[r.status] || "Sign-in failed (" + r.status + ").";
+    }).catch(function () { errBox.textContent = "Lost connection to the server."; });
   });
 
   $("mfa-form").addEventListener("submit", function (ev) {
@@ -272,12 +277,12 @@
       if (r.status === 200) { ev.target.reset(); return start(); }
       if (r.status === 401) {
         showPanel("login");
-        $("login-error").textContent = "Phiên xác thực đã hết hạn, hãy đăng nhập lại.";
+        $("login-error").textContent = "Your verification session expired. Please sign in again.";
         return;
       }
-      $("mfa-error").textContent = r.status === 403 ? "Mã OTP không đúng, hoặc IP của bạn đã bị khóa."
-        : "Xác thực thất bại (" + r.status + ").";
-    }).catch(function () { $("mfa-error").textContent = "Mất kết nối tới máy chủ."; });
+      $("mfa-error").textContent = r.status === 403 ? "Wrong OTP code, or your IP has been blocked."
+        : "Verification failed (" + r.status + ").";
+    }).catch(function () { $("mfa-error").textContent = "Lost connection to the server."; });
   });
 
   // ---------------------------------------------------------------- dang ky
@@ -287,14 +292,14 @@
       var pass = $(ids.pass).value, pass2 = $(ids.pass2).value;
       var result = PasswordStrength.evaluate(pass, getEmail());
       $(ids.meter).setAttribute("data-level", pass ? String(result.level) : "-1");
-      $(ids.level).textContent = pass ? "Độ mạnh: " + PasswordStrength.LABELS[result.level] : "Chưa nhập mật khẩu";
+      $(ids.level).textContent = pass ? "Strength: " + PasswordStrength.LABELS[result.level] : "No password entered";
       $(ids.warning).textContent = pass ? PasswordStrength.WARNINGS[result.level] : "";
       var tips = $(ids.tips);
       tips.replaceChildren();
       result.tips.forEach(function (t) { var li = document.createElement("li"); li.textContent = t; tips.appendChild(li); });
       var match = pass !== "" && pass === pass2;
       $(ids.submit).disabled = !(result.level >= cfg.min_password_level && match && extraValid());
-      $(ids.error).textContent = pass && pass2 && !match ? "Hai mật khẩu chưa giống nhau." : "";
+      $(ids.error).textContent = pass && pass2 && !match ? "The two passwords do not match." : "";
       return result;
     }
     [ids.pass, ids.pass2].concat(ids.extra || []).forEach(function (id) { $(id).addEventListener("input", update); });
@@ -320,11 +325,11 @@
         ev.target.reset(); updateStrength();
         return showPanel("confirm");
       }
-      var msg = { weak_password: "Mật khẩu chưa đủ mạnh.", invalid_email: "Email không hợp lệ.",
-                  rate_limited: "Bạn thao tác quá nhiều lần, thử lại sau ít phút." };
-      errBox.textContent = msg[r.body.error] || "Đăng ký thất bại (" + r.status + ").";
+      var msg = { weak_password: "The password is not strong enough.", invalid_email: "Invalid email address.",
+                  rate_limited: "Too many attempts. Try again in a few minutes." };
+      errBox.textContent = msg[r.body.error] || "Sign-up failed (" + r.status + ").";
       updateStrength();
-    }).catch(function () { errBox.textContent = "Mất kết nối tới máy chủ."; updateStrength(); });
+    }).catch(function () { errBox.textContent = "Lost connection to the server."; updateStrength(); });
   });
 
   $("confirm-form").addEventListener("submit", function (ev) {
@@ -336,19 +341,19 @@
         $("login-user").value = pendingEmail; updateOtpField();
         showPanel("login");
         $("login-error").textContent = "";
-        $("login-hint").textContent = "Email đã được xác nhận. Hãy đăng nhập; quản trị viên sẽ duyệt tài khoản của bạn.";
+        $("login-hint").textContent = "Email confirmed. Sign in now; an administrator will approve your account.";
         return;
       }
-      var msg = { 429: "Thử quá nhiều lần, hãy đợi vài phút." };
-      $("confirm-error").textContent = msg[r.status] || "Mã không đúng hoặc đã hết hạn.";
-    }).catch(function () { $("confirm-error").textContent = "Mất kết nối tới máy chủ."; });
+      var msg = { 429: "Too many attempts. Please wait a few minutes." };
+      $("confirm-error").textContent = msg[r.status] || "The code is wrong or has expired.";
+    }).catch(function () { $("confirm-error").textContent = "Lost connection to the server."; });
   });
 
   $("resend").addEventListener("click", function () {
     $("confirm-error").textContent = ""; $("confirm-ok").textContent = "";
     post("/auth/resend", { email: pendingEmail }).then(function (r) {
-      if (r.status === 200) $("confirm-ok").textContent = "Nếu email hợp lệ, mã mới đã được gửi.";
-      else $("confirm-error").textContent = r.status === 429 ? "Bạn yêu cầu quá nhiều lần, hãy đợi vài phút." : "Gửi lại mã thất bại.";
+      if (r.status === 200) $("confirm-ok").textContent = "If the email is valid, a new code has been sent.";
+      else $("confirm-error").textContent = r.status === 429 ? "Too many requests. Please wait a few minutes." : "Could not resend the code.";
     });
   });
 
@@ -380,15 +385,15 @@
     $("forgot-error").textContent = "";
     post("/auth/forgot", { email: email }).then(function (r) {
       if (r.status !== 200) {
-        $("forgot-error").textContent = r.status === 429 ? "Bạn yêu cầu quá nhiều lần, hãy đợi vài phút." : "Không gửi được mã (" + r.status + ").";
+        $("forgot-error").textContent = r.status === 429 ? "Too many requests. Please wait a few minutes." : "Could not send the code (" + r.status + ").";
         return;
       }
       pendingEmail = email;
-      $("reset-info").textContent = "Nếu " + email + " đã đăng ký, mã 6 số đã được gửi tới hộp thư. Nhập mã và mật khẩu mới bên dưới.";
+      $("reset-info").textContent = "If " + email + " is registered, a 6-digit code has been sent to the inbox. Enter the code and a new password below.";
       $("reset-form").reset(); $("reset-error").textContent = "";
       updateResetStrength();
       showPanel("reset");
-    }).catch(function () { $("forgot-error").textContent = "Mất kết nối tới máy chủ."; });
+    }).catch(function () { $("forgot-error").textContent = "Lost connection to the server."; });
   });
 
   $("reset-form").addEventListener("submit", function (ev) {
@@ -402,14 +407,14 @@
         $("login-user").value = pendingEmail; updateOtpField();
         showPanel("login");
         $("login-error").textContent = "";
-        $("login-hint").textContent = "Đã đổi mật khẩu. Hãy đăng nhập bằng mật khẩu mới.";
+        $("login-hint").textContent = "Password changed. Sign in with your new password.";
         return;
       }
-      var msg = { invalid_code: "Mã không đúng hoặc đã hết hạn.", weak_password: "Mật khẩu chưa đủ mạnh.",
-                  rate_limited: "Thử quá nhiều lần, hãy đợi vài phút." };
-      $("reset-error").textContent = msg[r.body.error] || "Đặt lại mật khẩu thất bại (" + r.status + ").";
+      var msg = { invalid_code: "The code is wrong or has expired.", weak_password: "The password is not strong enough.",
+                  rate_limited: "Too many attempts. Please wait a few minutes." };
+      $("reset-error").textContent = msg[r.body.error] || "Password reset failed (" + r.status + ").";
       updateResetStrength();
-    }).catch(function () { $("reset-error").textContent = "Mất kết nối tới máy chủ."; updateResetStrength(); });
+    }).catch(function () { $("reset-error").textContent = "Lost connection to the server."; updateResetStrength(); });
   });
 
   // ------------------------------------------------------ tai khoan & 2FA
@@ -424,30 +429,30 @@
   function loadAccount() {
     api("/api/account").then(function (r) {
       if (r.status === 401) return showLogin();
-      if (r.status !== 200) { $("account-error").textContent = "Không đọc được thông tin tài khoản."; return; }
+      if (r.status !== 200) { $("account-error").textContent = "Could not load account details."; return; }
       var a = r.body, toggle = $("mfa-toggle");
       $("acc-email").textContent = a.email;
       $("acc-role").textContent = ROLE_LABEL[a.role] || a.role;
       $("account-error").textContent = "";
       if (a.auth !== "cognito") {
-        $("mfa-state").textContent = "đang bật (bắt buộc)";
-        $("mfa-note").textContent = "Tài khoản quản trị nội bộ luôn dùng 2FA; khóa được cấu hình trên máy chủ nên không tắt được ở đây.";
+        $("mfa-state").textContent = "on (required)";
+        $("mfa-note").textContent = "The internal admin account always uses 2FA; its key is configured on the server, so it cannot be turned off here.";
         toggle.hidden = true;
         return;
       }
       var adminLocked = a.role === "admin" && a.mfa_enabled;   // quan tri vien khong duoc tat 2FA
       toggle.hidden = adminLocked;
       toggle.setAttribute("data-enabled", a.mfa_enabled ? "1" : "0");
-      toggle.textContent = a.mfa_enabled ? "Tắt 2FA" : "Bật 2FA";
-      $("mfa-state").textContent = a.mfa_enabled ? "đang BẬT" : "đang TẮT";
+      toggle.textContent = a.mfa_enabled ? "Turn off 2FA" : "Turn on 2FA";
+      $("mfa-state").textContent = a.mfa_enabled ? "ON" : "OFF";
       $("mfa-note").textContent = adminLocked
-        ? "Quản trị viên bắt buộc dùng 2FA nên không có nút tắt."
+        ? "Administrators must use 2FA, so there is no button to turn it off."
         : a.mfa_enabled
-          ? "Mỗi lần đăng nhập bạn cần thêm mã 6 số từ ứng dụng Authenticator."
+          ? "Each sign-in also needs the 6-digit code from your Authenticator app."
           : a.role === "admin"
-            ? "Quản trị viên bắt buộc bật 2FA trước khi xem dữ liệu."
-            : "Khuyến nghị bật 2FA: nếu chỉ có mật khẩu, tài khoản dễ bị chiếm khi mật khẩu bị lộ.";
-    }).catch(function () { $("account-error").textContent = "Mất kết nối tới máy chủ."; });
+            ? "Administrators must turn on 2FA before they can see data."
+            : "Turning on 2FA is recommended: with a password alone, the account is easy to take over if the password leaks.";
+    }).catch(function () { $("account-error").textContent = "Lost connection to the server."; });
   }
 
   $("account-toggle").addEventListener("click", function () {
@@ -467,7 +472,7 @@
     $("mfa-disable").hidden = true;
     post("/api/mfa/setup").then(function (r) {
       if (r.status === 401) return showLogin();
-      if (r.status !== 200) { $("account-error").textContent = "Không bắt đầu được thiết lập 2FA."; return; }
+      if (r.status !== 200) { $("account-error").textContent = "Could not start the 2FA setup."; return; }
       $("mfa-secret").textContent = r.body.secret;
       showQr(r.body.qr_svg);
       $("mfa-enable-form").reset();
@@ -486,14 +491,14 @@
     post("/api/mfa/disable", { password: form.password.value, code: form.code.value.trim() }).then(function (r) {
       if (r.status === 401) return showLogin();
       if (r.status !== 200) {
-        var msg = { reauth_failed: "Mật khẩu hoặc mã OTP không đúng.", rate_limited: "Thử quá nhiều lần, hãy đợi vài phút." };
-        $("account-error").textContent = msg[r.body.error] || "Không tắt được 2FA (" + r.status + ").";
+        var msg = { reauth_failed: "Wrong password or OTP code.", rate_limited: "Too many attempts. Please wait a few minutes." };
+        $("account-error").textContent = msg[r.body.error] || "Could not turn off 2FA (" + r.status + ").";
         return;
       }
       form.reset();
       $("mfa-disable").hidden = true;
       loadAccount();
-    }).catch(function () { $("account-error").textContent = "Mất kết nối tới máy chủ."; });
+    }).catch(function () { $("account-error").textContent = "Lost connection to the server."; });
   });
 
   $("mfa-enable-form").addEventListener("submit", function (ev) {
@@ -501,7 +506,7 @@
     $("account-error").textContent = "";
     post("/api/mfa/enable", { code: ev.target.code.value.trim() }).then(function (r) {
       if (r.status === 401) return showLogin();
-      if (r.status !== 200) { $("account-error").textContent = "Mã OTP không đúng. Kiểm tra giờ trên điện thoại rồi thử lại."; return; }
+      if (r.status !== 200) { $("account-error").textContent = "Wrong OTP code. Check the time on your phone and try again."; return; }
       $("mfa-setup").hidden = true;
       $("mfa-secret").textContent = "";
       $("mfa-qr").replaceChildren();
@@ -513,31 +518,31 @@
   // ------------------------------------------------------- muc Phan quyen
   // PIN rieng 6 so; mo 10 phut. Nang/ha/vo hieu hoa can phieu cua cac quan tri vien khac (admin_governance.py).
   var GOV_ERRORS = {
-    weak_pin: "PIN phải đúng 6 chữ số và không dễ đoán (vd 123456, 000000, 121212).",
-    pin_exists: "Bạn đã có PIN.", wrong_pin: "PIN không đúng.",
-    pin_locked: "PIN đang bị khóa 15 phút do nhập sai nhiều lần.",
-    pin_required: "Mục Phân quyền đã tự khóa, hãy nhập lại PIN.",
-    busy: "Một thao tác phân quyền khác đang chạy, thử lại sau vài giây.",
-    local_admin_restricted: "Đã đủ 2 quản trị viên: tài khoản admin nội bộ chỉ còn xem và gỡ khóa IP.",
-    not_admin: "Chỉ quản trị viên được làm thao tác này.",
-    unauthenticated: "Phiên đăng nhập không còn hợp lệ với hệ thống phân quyền, hãy đăng nhập lại.",
-    upstream: "Dịch vụ tài khoản đang lỗi nên chưa thực hiện được. Yêu cầu vẫn được giữ; bấm Đồng ý lại để thử lại.",
-    invalid_target: "Không thực hiện được với tài khoản này.",
-    self_action: "Bạn không thể tự thao tác lên tài khoản của chính mình.",
-    min_admins: "Phải luôn còn ít nhất 2 quản trị viên.",
-    not_enough_admins: "Chưa đủ quản trị viên để duyệt thao tác này.",
-    local_admin_no_vote: "Đã đủ 2 quản trị viên: tài khoản admin nội bộ không còn quyền bỏ phiếu.",
-    not_a_voter: "Bạn không được bỏ phiếu cho yêu cầu này.",
-    already_voted: "Bạn đã đồng ý yêu cầu này rồi.", request_closed: "Yêu cầu đã kết thúc.",
-    request_expired: "Yêu cầu đã hết hạn (24 giờ).", not_found: "Không tìm thấy.",
-    execution_failed: "Không thực hiện được: danh sách người dùng đã thay đổi.",
-    invalid_request: "Yêu cầu không hợp lệ."
+    weak_pin: "The PIN must be exactly 6 digits and not easy to guess (e.g. 123456, 000000, 121212).",
+    pin_exists: "You already have a PIN.", wrong_pin: "Wrong PIN.",
+    pin_locked: "The PIN is locked for 15 minutes after too many wrong attempts.",
+    pin_required: "The Roles section locked itself. Enter your PIN again.",
+    busy: "Another role change is running. Try again in a few seconds.",
+    local_admin_restricted: "There are already 2 administrators: the internal admin account can now only view data and unblock IPs.",
+    not_admin: "Only administrators can do this.",
+    unauthenticated: "Your session is no longer valid for role management. Please sign in again.",
+    upstream: "The account service failed, so the change was not applied. The request is kept; click Approve again to retry.",
+    invalid_target: "This action cannot be applied to that account.",
+    self_action: "You cannot apply this action to your own account.",
+    min_admins: "There must always be at least 2 administrators.",
+    not_enough_admins: "Not enough administrators to approve this action.",
+    local_admin_no_vote: "There are already 2 administrators: the internal admin account can no longer vote.",
+    not_a_voter: "You cannot vote on this request.",
+    already_voted: "You have already approved this request.", request_closed: "This request is closed.",
+    request_expired: "This request has expired (24 hours).", not_found: "Not found.",
+    execution_failed: "Could not apply the change: the user list has changed.",
+    invalid_request: "Invalid request."
   };
-  var ACTION_LABEL = { promote: "Nâng lên Quản trị", demote: "Hạ xuống Người xem", disable: "Vô hiệu hóa" };
+  var ACTION_LABEL = { promote: "Promote to Admin", demote: "Demote to Viewer", disable: "Disable" };
   var govClock = null, govUntil = 0, clockOffset = 0;
 
   function govMessage(r) {
-    return GOV_ERRORS[r.body.error] || "Thao tác thất bại (" + (r.body.error || r.status) + ").";
+    return GOV_ERRORS[r.body.error] || "Action failed (" + (r.body.error || r.status) + ").";
   }
 
   function govNotify(err, ok) { $("gov-error").textContent = err || ""; $("gov-ok").textContent = ok || ""; }
@@ -551,14 +556,14 @@
   function tickGovClock() {
     var left = Math.round(govUntil - (Date.now() / 1000 + clockOffset));
     if (left <= 0) { clearInterval(govClock); $("gov-timer").textContent = ""; return loadGov(); }
-    $("gov-timer").textContent = "Tự khóa sau " + Math.floor(left / 60) + ":" + ("0" + (left % 60)).slice(-2);
+    $("gov-timer").textContent = "Locks in " + Math.floor(left / 60) + ":" + ("0" + (left % 60)).slice(-2);
   }
 
   function loadGov() {
     return api("/api/governance").then(function (r) {
       if (r.status === 401) return showLogin();
       if (r.status === 403 && r.body.error === "mfa_setup_required") return start();
-      if (r.status !== 200) { govNotify("Không tải được mục Phân quyền."); return; }
+      if (r.status !== 200) { govNotify("Could not load the Roles section."); return; }
       var g = r.body;
       clearInterval(govClock);
       renderGovSummary(g);   // canh bao do duoi 2 admin: hien ca khi muc dang khoa
@@ -572,7 +577,7 @@
       govClock = setInterval(tickGovClock, 1000);
       renderRequests(g.requests || []);
       return loadUsers();
-    }).catch(function () { govNotify("Mất kết nối tới máy chủ."); });
+    }).catch(function () { govNotify("Lost connection to the server."); });
   }
 
   // Muc dang khoa: van bao co bao nhieu tai khoan cho duyet (chi dem, khong lo email) de admin biet vi sao can PIN.
@@ -581,19 +586,19 @@
     api("/api/users").then(function (r) {
       var n = r.status === 200 && r.body.pending ? r.body.pending.length : 0;
       hint.hidden = n === 0;
-      hint.textContent = "Có " + n + " tài khoản đang chờ duyệt. " +
-        (hasPin ? "Nhập PIN bên dưới để mở mục và duyệt." : "Đặt PIN bên dưới để mở mục và duyệt.");
+      hint.textContent = n + " account(s) waiting for approval. " +
+        (hasPin ? "Enter your PIN below to open this section and approve them." : "Set a PIN below to open this section and approve them.");
     }).catch(function () { hint.hidden = true; });
   }
 
   function renderGovSummary(g) {
     var warn = $("gov-min-warning"), boot = $("gov-bootstrap");
     warn.hidden = g.admin_count >= 2;
-    warn.textContent = "Hiện có " + g.admin_count + " quản trị viên, tối thiểu phải là 2.";
+    warn.textContent = "There are " + g.admin_count + " administrator(s); at least 2 are required.";
     boot.hidden = !g.bootstrap;
     boot.textContent = authKind === "local"
-      ? "Chế độ khởi tạo: bạn (admin nội bộ) được tự nâng một Người xem lên Quản trị cho tới khi đủ 2 quản trị viên."
-      : "Chế độ khởi tạo: admin nội bộ được bỏ phiếu thay người thứ hai cho tới khi đủ 2 quản trị viên.";
+      ? "Bootstrap mode: you (internal admin) may promote a Viewer to Admin by yourself until there are 2 administrators."
+      : "Bootstrap mode: the internal admin may cast the second vote until there are 2 administrators.";
   }
 
   function renderRequests(requests) {
@@ -607,11 +612,11 @@
       tr.appendChild(cell(q.approvals + "/" + q.needed));
       tr.appendChild(cell(localTime(q.expires_at * 1000), "muted"));
       var td = document.createElement("td");
-      td.appendChild(govButton("Đồng ý", function () {
+      td.appendChild(govButton("Approve", function () {
         return govAction("/api/governance/requests/" + encodeURIComponent(q.id) + "/vote", { decision: "approve" });
       }));
-      td.appendChild(govButton("Từ chối", function () {
-        if (!window.confirm("Từ chối sẽ hủy yêu cầu ngay. Tiếp tục?")) return null;
+      td.appendChild(govButton("Reject", function () {
+        if (!window.confirm("Rejecting cancels the request immediately. Continue?")) return null;
         return govAction("/api/governance/requests/" + encodeURIComponent(q.id) + "/vote", { decision: "reject" });
       }));
       tr.appendChild(td);
@@ -635,27 +640,27 @@
   // Thao tac can PIN xac nhan (tao yeu cau, bo phieu, dat lai PIN).
   function govAction(path, body) {
     var pin = $("gov-pin").value.trim();
-    if (!/^[0-9]{6}$/.test(pin)) { govNotify("Nhập PIN xác nhận (6 số) trước khi thao tác."); $("gov-pin").focus(); return null; }
+    if (!/^[0-9]{6}$/.test(pin)) { govNotify("Enter the confirmation PIN (6 digits) first."); $("gov-pin").focus(); return null; }
     govNotify();
     return post(path, Object.assign({ pin: pin }, body)).then(function (r) {
       $("gov-pin").value = "";
       if (r.status === 401) return showLogin();
       if (r.status !== 200) { govNotify(govMessage(r)); return loadGov(); }
-      var msg = { pending: "Đã ghi phiếu. Đang chờ các quản trị viên khác đồng ý.",
-                  executed: "Đã thực hiện: " + (ACTION_LABEL[r.body.action] || "") + " " + (r.body.target_user || "") + ".",
-                  rejected: "Đã từ chối và hủy yêu cầu." };
-      govNotify("", msg[r.body.status] || "Đã lưu.");
+      var msg = { pending: "Vote recorded. Waiting for other administrators to approve.",
+                  executed: "Done: " + (ACTION_LABEL[r.body.action] || "") + " " + (r.body.target_user || "") + ".",
+                  rejected: "Rejected and cancelled the request." };
+      govNotify("", msg[r.body.status] || "Saved.");
       return loadGov();
-    }).catch(function () { govNotify("Mất kết nối tới máy chủ."); });
+    }).catch(function () { govNotify("Lost connection to the server."); });
   }
 
   function propose(action, u) {
-    if (!window.confirm(ACTION_LABEL[action] + ": " + u.email + "?\nCác quản trị viên khác cần đồng ý thì mới có hiệu lực.")) return null;
+    if (!window.confirm(ACTION_LABEL[action] + ": " + u.email + "?\nOther administrators must approve before it takes effect.")) return null;
     return govAction("/api/governance/requests", { action: action, username: u.username });
   }
 
   function simpleUserAction(action, u) {
-    if (action === "revoke" && !window.confirm("Thu hồi quyền xem của " + u.email + "?")) return null;
+    if (action === "revoke" && !window.confirm("Revoke viewer access for " + u.email + "?")) return null;
     govNotify();
     return post("/api/users/" + action, { username: u.username }).then(function (r) {
       if (r.status !== 200) govNotify(govMessage(r));
@@ -682,20 +687,20 @@
 
   function loadUsers() {
     return api("/api/users").then(function (r) {
-      if (r.status !== 200) { govNotify("Không tải được danh sách người dùng."); return; }
+      if (r.status !== 200) { govNotify("Could not load the user list."); return; }
       fillUsers("users-pending", "users-pending-empty", r.body.pending, function (u) {
-        return [["Duyệt", function () { return simpleUserAction("approve", u); }]];
+        return [["Approve", function () { return simpleUserAction("approve", u); }]];
       });
       fillUsers("users-viewers", "users-viewers-empty", r.body.viewers, function (u) {
-        return [["Thu hồi", function () { return simpleUserAction("revoke", u); }],
-                ["Đề xuất lên Quản trị", function () { return propose("promote", u); }],
-                ["Vô hiệu hóa", function () { return propose("disable", u); }]];
+        return [["Revoke", function () { return simpleUserAction("revoke", u); }],
+                ["Propose Admin", function () { return propose("promote", u); }],
+                ["Disable", function () { return propose("disable", u); }]];
       });
       fillUsers("users-admins", "users-admins-empty", r.body.admins, function (u) {
-        return [["Đề xuất hạ quyền", function () { return propose("demote", u); }],
-                ["Vô hiệu hóa", function () { return propose("disable", u); }],
-                ["Đặt lại PIN", function () {
-                  if (!window.confirm("Xóa PIN của " + u.email + "? Người đó sẽ tự đặt PIN mới ở lần vào sau.")) return null;
+        return [["Propose demotion", function () { return propose("demote", u); }],
+                ["Disable", function () { return propose("disable", u); }],
+                ["Reset PIN", function () {
+                  if (!window.confirm("Delete the PIN of " + u.email + "? They will set a new PIN next time.")) return null;
                   return govAction("/api/governance/pin/reset", { username: u.username });
                 }]];
       });
@@ -705,12 +710,12 @@
   $("gov-setpin-form").addEventListener("submit", function (ev) {
     ev.preventDefault();
     var form = ev.target;
-    if (form.pin.value !== form.pin2.value) { govNotify("Hai lần nhập PIN chưa giống nhau."); return; }
+    if (form.pin.value !== form.pin2.value) { govNotify("The two PINs do not match."); return; }
     govNotify();
     post("/api/governance/pin", { pin: form.pin.value }).then(function (r) {
       form.reset();
       if (r.status !== 200) { govNotify(govMessage(r)); return; }
-      govNotify("", "Đã đặt PIN. Mục Phân quyền mở trong 10 phút.");
+      govNotify("", "PIN set. The Roles section is open for 10 minutes.");
       loadGov();
     });
   });
@@ -743,20 +748,102 @@
   });
 
   function loadStats() {
-    $("stats-note").textContent = "Đang tải…";
+    $("stats-note").textContent = "Loading…";
     var tz = -new Date().getTimezoneOffset();   // phut lech UTC cua nguoi xem: ngay bat dau luc 00:00 gio dia phuong
     api("/api/stats?range=" + encodeURIComponent(statsRange) + "&tz=" + tz).then(function (r) {
       if (r.status === 401) { showLogin(); return; }
-      if (r.status !== 200) { $("stats-note").textContent = "Không tải được thống kê."; return; }
+      if (r.status !== 200) { $("stats-note").textContent = "Could not load statistics."; return; }
       try {
         IncidentCharts.render(r.body, { hourly: $("stats-hourly"), matrix: $("stats-matrix"),
                                         table: $("stats-table"), note: $("stats-note"), legend: $("stats-legend"),
                                         tip: $("viz-tip") });
       } catch (e) {   // du lieu khong dung dinh dang: bao dung loi, khong nham voi mat mang
-        $("stats-note").textContent = "Không vẽ được thống kê (dữ liệu không hợp lệ).";
+        $("stats-note").textContent = "Could not draw statistics (invalid data).";
       }
-    }).catch(function () { $("stats-note").textContent = "Mất kết nối tới máy chủ."; });
+    }).catch(function () { $("stats-note").textContent = "Lost connection to the server."; });
   }
+
+  // ------------------------------------------------------------- system health (admin)
+  // Alarm + Lambda metric doc tu CloudWatch qua may chu (role EC2 chi doc); trinh duyet khong goi AWS truc tiep.
+  var HEALTH_MS = 300000, healthTimer = null, healthRange = "24h";
+  var STATE_LABEL = { OK: "OK", ALARM: "ALARM", INSUFFICIENT_DATA: "No data" };
+
+  function sparkline(inv, err) {
+    var NS = "http://www.w3.org/2000/svg", W = 160, H = 28, n = inv.length || 1;
+    var max = Math.max.apply(null, inv.concat([1])), slot = W / n, bw = Math.max(1, slot - 1);
+    var svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    svg.setAttribute("width", W); svg.setAttribute("height", H);
+    svg.setAttribute("class", "spark");
+    inv.forEach(function (v, i) {
+      var h = v ? Math.max(1.5, (v / max) * (H - 2)) : 0;
+      var r = document.createElementNS(NS, "rect");
+      r.setAttribute("x", i * slot); r.setAttribute("y", H - h); r.setAttribute("width", bw); r.setAttribute("height", h);
+      r.setAttribute("class", err[i] ? "spark-err" : "spark-inv");
+      var t = document.createElementNS(NS, "title");
+      t.textContent = v + " invocation(s), " + (err[i] || 0) + " error(s)";
+      r.appendChild(t);
+      svg.appendChild(r);
+    });
+    return svg;
+  }
+
+  function renderHealth(h) {
+    var ab = $("health-alarms");
+    ab.replaceChildren();
+    h.alarms.forEach(function (a) {
+      var tr = document.createElement("tr"), td = document.createElement("td"), badge = document.createElement("span");
+      badge.className = "state " + a.state;
+      badge.textContent = STATE_LABEL[a.state] || a.state;
+      td.appendChild(badge);
+      tr.appendChild(td);
+      tr.appendChild(cell(a.name));
+      tr.appendChild(cell(a.description, "details"));
+      tr.appendChild(cell(a.updated ? localTime(a.updated * 1000) : ""));
+      ab.appendChild(tr);
+    });
+    var fb = $("health-functions");
+    fb.replaceChildren();
+    h.functions.forEach(function (f) {
+      var tr = document.createElement("tr"), td = document.createElement("td");
+      tr.appendChild(cell(f.label, "mono"));
+      tr.appendChild(cell(f.total_invocations));
+      tr.appendChild(cell(f.total_errors, f.total_errors ? "err-count" : ""));
+      tr.appendChild(cell(f.total_invocations ? (100 * f.total_errors / f.total_invocations).toFixed(1) + "%" : "0%"));
+      td.appendChild(sparkline(f.invocations, f.errors));
+      tr.appendChild(td);
+      fb.appendChild(tr);
+    });
+    var bad = h.alarms.filter(function (a) { return a.state === "ALARM"; }).length;
+    $("health-note").textContent = (bad ? bad + " alarm(s) firing" : "All alarms OK or without data") +
+      " · checked at " + new Date(h.checked_at * 1000).toLocaleTimeString("en-GB") + " · refreshes every 5 minutes";
+    var link = $("health-dashboard");
+    link.hidden = !h.dashboard_url;
+    if (h.dashboard_url) link.href = h.dashboard_url;
+  }
+
+  function loadHealth() {
+    var tz = -new Date().getTimezoneOffset();
+    api("/api/health?range=" + encodeURIComponent(healthRange) + "&tz=" + tz).then(function (r) {
+      if (r.status === 401) { showLogin(); return; }
+      if (r.status === 404) { $("health-card").hidden = true; return; }
+      if (r.status !== 200) { $("health-note").textContent = (r.body && r.body.error) || "Could not read CloudWatch."; return; }
+      try { renderHealth(r.body); } catch (e) { $("health-note").textContent = "Could not show health data (invalid data)."; }
+    }).catch(function () { $("health-note").textContent = "Lost connection to the server."; });
+  }
+
+  function selectHealthRange(rng) {
+    healthRange = rng;
+    Array.prototype.forEach.call($("health-range").querySelectorAll("button"), function (b) {
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-range") === rng));
+    });
+    loadHealth();
+  }
+
+  $("health-range").addEventListener("click", function (ev) {
+    var b = ev.target.closest("button[data-range]");
+    if (b) selectHealthRange(b.getAttribute("data-range"));
+  });
 
   // ------------------------------------------------------------- tro ly AI
   // Cau tra loi cua AI la du lieu khong tin cay (co the bi log tan cong dan dat): chi hien bang textContent.
@@ -771,9 +858,9 @@
 
   function chatAbout(incident) {
     chatIncident = incident;
-    $("chat-context").textContent = incident ? (incident.rule + " lúc " + localTime(incident.time)) : "các sự cố gần đây";
+    $("chat-context").textContent = incident ? (incident.rule + " at " + localTime(incident.time)) : "recent incidents";
     $("chat-clear").hidden = !incident;
-    if (incident && !$("chat-input").value) $("chat-input").value = "Sự cố này là gì, có nguy hiểm không, cần khắc phục thế nào?";
+    if (incident && !$("chat-input").value) $("chat-input").value = "What is this incident, is it dangerous, and how do I fix it?";
     $("chat-card").scrollIntoView({ behavior: "smooth" });
     $("chat-input").focus();
   }
@@ -789,16 +876,16 @@
     $("chat-error").textContent = "";
     $("chat-send").disabled = true;
     chatLine("user", message);
-    var waiting = chatLine("ai muted", "Đang phân tích…");
+    var waiting = chatLine("ai muted", "Analyzing…");
     post("/api/chat", body).then(function (r) {
       if (r.status === 200) { waiting.className = "msg ai"; waiting.textContent = r.body.answer; $("chat-input").value = ""; return; }
       waiting.remove();
       if (r.status === 401) { showLogin(); return; }
       $("chat-error").textContent = (r.body && r.body.error) ||
-        (r.status === 429 ? "Bạn hỏi quá nhanh, đợi một chút." : "Trợ lý AI tạm thời không trả lời được.");
+        (r.status === 429 ? "You are asking too fast. Please wait a moment." : "The AI assistant is temporarily unavailable.");
     }).catch(function () {
       waiting.remove();
-      $("chat-error").textContent = "Mất kết nối tới máy chủ.";
+      $("chat-error").textContent = "Lost connection to the server.";
     }).then(function () { $("chat-send").disabled = false; });
   });
 

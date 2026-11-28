@@ -86,7 +86,7 @@ Giới hạn của chế độ edge cần biết:
 
 ## 5. Phân quyền admin (`sample_app/admin_governance.py`, 12/11/2026)
 
-Thiết kế: [NHAT_KY.md](NHAT_KY.md), mục Phân quyền admin. Tóm tắt các lớp bảo vệ:
+Tóm tắt các lớp bảo vệ:
 
 - **Admin bắt buộc 2FA.** Admin Cognito chưa bật 2FA chỉ vào được màn hình bật 2FA; admin không tắt được 2FA.
 - **PIN riêng cho mục Phân quyền.** 6 số, chặn mã dễ đoán, băm scrypt (muối riêng), mở 10 phút. Sai 5 lần khóa 15 phút; bộ đếm nằm trong DynamoDB nên dùng chung mọi worker và không mất khi đăng nhập lại. Mỗi phiếu (đồng ý hoặc từ chối) đều phải nhập lại PIN.
@@ -165,7 +165,7 @@ Các quyết định đã chốt với chủ dự án (11/2026):
 
 Việc phải làm khi triển khai: miễn kiểm header `X-Origin-Verify` cho `/health` (ALB health check không mang header
 này); đổi cách lấy IP thật sang header `CloudFront-Viewer-Address` vì có thêm ALB ở giữa, rồi chạy lại test
-B1 và F9 của bộ red-team; thay `user_data_causes_replacement` bằng rolling update. Chi phí: xem `COST.md` mục 3.
+B1 và F9 của bộ red-team; thay `user_data_causes_replacement` bằng rolling update.
 
 Lý do hoãn: chi phí khoảng 70 USD/tháng, gấp 4 lần chế độ mặc định, trong khi mục tiêu hiện tại là đồ án.
 

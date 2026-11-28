@@ -44,6 +44,8 @@ INCIDENT_TTL_S = 30 * 86400  # bang thoi gian luu log (LOG_RETENTION_DAYS) de su
 BLOCK_TTL_S = 86400
 BRUTE_FORCE_WINDOW_S = 60
 BRUTE_FORCE_THRESHOLD = 5
+MFA_FAILED_WINDOW_S = 60
+MFA_FAILED_THRESHOLD = 5   # mat khau dung nhung sai ma OTP: 5 lan / 60s moi la tan cong (go nham 1-4 lan la binh thuong)
 # Brute-force cham tu 1 IP (moi lan doan cach nhau du lau de ne cua so 60s o tren).
 SLOW_BRUTE_FORCE_WINDOW_S = 3600
 SLOW_BRUTE_FORCE_THRESHOLD = 20
@@ -171,28 +173,28 @@ _SEVERITY_ICON = {"CRITICAL": chr(0x1F534), "HIGH": chr(0x1F7E0)}   # cham do / 
 TELEGRAM_VALUE_CHARS = 300
 TELEGRAM_MAX_FIELDS = 8
 # Truong quen thuoc dua len dau voi nhan de doc; phan con lai liet ke theo ten truong.
-_TELEGRAM_LABELS = (("client_ip", "IP"), ("ip", "IP"), ("username", "Tài khoản"), ("user", "Tài khoản"),
-                    ("actor", "Người thực hiện"), ("action", "Hành động"))
+_TELEGRAM_LABELS = (("client_ip", "IP"), ("ip", "IP"), ("username", "Account"), ("user", "Account"),
+                    ("actor", "Actor"), ("action", "Action"))
 _TELEGRAM_SKIP = {"timestamp", "source", "event_type", "severity"} | {k for k, _ in _TELEGRAM_LABELS}
 # Ten de doc cho cac truong ky thuat hay gap; truong la giu nguyen ten goc (de doi chieu voi SOC Console).
 _FIELD_NAMES = {
-    "status_code": "Mã HTTP", "attempt_count": "Số lần thử", "window_seconds": "Trong khoảng (giây)",
-    "payload": "Dữ liệu tấn công", "raw_payload": "Dữ liệu tấn công", "path": "Đường dẫn",
-    "user_agent": "Trình duyệt / công cụ", "reason": "Lý do", "target_user": "Tài khoản bị tác động",
-    "via_service": "Qua dịch vụ", "last_ip": "IP gần nhất", "last_username": "Tài khoản gần nhất",
-    "mfa_used": "Có dùng MFA", "error_code": "Mã lỗi", "outcome": "Kết quả", "key_id": "Khóa KMS",
-    "approvers": "Người duyệt", "request_id": "Mã yêu cầu", "bootstrap": "Chế độ khởi tạo",
+    "status_code": "HTTP status", "attempt_count": "Attempts", "window_seconds": "Window (seconds)",
+    "payload": "Attack payload", "raw_payload": "Attack payload", "path": "Path",
+    "user_agent": "User agent", "reason": "Reason", "target_user": "Target account",
+    "via_service": "Via service", "last_ip": "Latest IP", "last_username": "Latest account",
+    "mfa_used": "MFA used", "error_code": "Error code", "outcome": "Outcome", "key_id": "KMS key",
+    "approvers": "Approvers", "request_id": "Request ID", "bootstrap": "Bootstrap mode",
 }
 VN_OFFSET = timedelta(hours=7)   # nguoi nhan canh bao o Viet Nam: hien gio dia phuong (UTC+7, khong doi gio mua he)
 
 
 def _vn_time(now_iso: str):
-    """'2026-11-11T08:30:00+00:00' -> '15:30:00 11/11/2026 (giờ VN)'; chuoi la -> None."""
+    """'2026-11-11T08:30:00+00:00' -> '15:30:00 11/11/2026 (UTC+7)'; chuoi la -> None."""
     try:
         t = datetime.fromisoformat(now_iso).astimezone(timezone.utc) + VN_OFFSET
     except (TypeError, ValueError):
         return None
-    return t.strftime("%H:%M:%S %d/%m/%Y") + " (giờ VN)"
+    return t.strftime("%H:%M:%S %d/%m/%Y") + " (UTC+7)"
 
 
 def _tg(value, limit: int = TELEGRAM_VALUE_CHARS) -> str:
@@ -215,7 +217,7 @@ def _render_telegram(severity: str, rule: str, details: dict, inc_id: str, now_i
     """Tin nhan cho man hinh dien thoai: moi dong mot y, gia tri ky thuat nam trong <code> de cham la sao chep."""
     details = details if isinstance(details, dict) else {}
     lines = [f"{_SEVERITY_ICON.get(severity, chr(0x26A0))} <b>{_tg(severity, 20)}</b> | <b>{_tg(rule, 60)}</b>",
-             f"Thời gian: {_telegram_time(now_iso)}"]
+             f"Time: {_telegram_time(now_iso)}"]
     seen = set()
     for key, label in _TELEGRAM_LABELS:
         if details.get(key) not in (None, "") and label not in seen:
@@ -225,8 +227,8 @@ def _render_telegram(severity: str, rule: str, details: dict, inc_id: str, now_i
     for key in extra[:TELEGRAM_MAX_FIELDS]:
         lines.append(f"{_tg(_FIELD_NAMES.get(key, str(key)), 40)}: <code>{_tg(details[key])}</code>")
     if len(extra) > TELEGRAM_MAX_FIELDS:
-        lines.append(f"(+{len(extra) - TELEGRAM_MAX_FIELDS} trường khác, xem SOC Console)")
-    lines.append(f"Mã sự cố: <code>{_tg(inc_id, 60)}</code>")
+        lines.append(f"(+{len(extra) - TELEGRAM_MAX_FIELDS} more fields, see the SOC Console)")
+    lines.append(f"Incident ID: <code>{_tg(inc_id, 60)}</code>")
     return "\n".join(lines)
 
 
@@ -266,9 +268,9 @@ def _render_alert(severity: str, rule: str, details: dict, inc_id: str, now_iso:
     """Van ban thuong: noi dung email SNS, va ban du phong cho Telegram khi tin HTML qua dai (_render_telegram)."""
     return (
         f"[LogSentinel {severity}] {rule}\n"
-        f"Thời gian: {_vn_time(now_iso) or now_iso} · {now_iso}\n"
-        f"Chi tiết: {json.dumps(details, ensure_ascii=False, default=str)}\n"
-        f"Mã sự cố: {inc_id}"
+        f"Time: {_vn_time(now_iso) or now_iso} · {now_iso}\n"
+        f"Details: {json.dumps(details, ensure_ascii=False, default=str)}\n"
+        f"Incident ID: {inc_id}"
     )
 
 
@@ -431,11 +433,16 @@ def evaluate_webapp_log(raw_message: str) -> None:
 
     if event_type == "MFA_BYPASS_ATTEMPT":
         record_incident("MFA_BYPASS_ATTEMPT", "CRITICAL", data, raw_message)
-        auto_block_attacker_ip(client_ip, "Dung mat khau nhung sai ma 2FA TOTP")
+        auto_block_attacker_ip(client_ip, "Correct password but wrong 2FA TOTP code")
 
     elif event_type == "SQL_INJECTION":
         record_incident("SQL_INJECTION", "CRITICAL", data, raw_message)
-        auto_block_attacker_ip(client_ip, "Phat hien payload SQL Injection / Path Traversal")
+        auto_block_attacker_ip(client_ip, "SQL injection / path traversal payload detected")
+
+    elif event_type == "SESSION_IP_CHANGED":
+        # Phien dang nhap bi dung tu IP khac IP luc dang nhap: cookie bi danh cap HOAC admin vua doi mang.
+        # Web app da dua phien ve man hinh dang nhap; o day chi canh bao, KHONG khoa (co the la IP cua admin).
+        record_incident(event_type, "HIGH", data, raw_message)
 
     elif event_type in GOVERNANCE_EVENTS:
         # Thao tac trong muc Phan quyen cua SOC Console: canh bao cho moi admin. KHONG khoa IP (IP cua admin).
@@ -450,7 +457,18 @@ def evaluate_webapp_log(raw_message: str) -> None:
         if count == SCAN_THRESHOLD:
             record_incident("SCAN_DETECTED", "HIGH",
                             {**data, "attempt_count": count, "window_seconds": SCAN_WINDOW_S}, raw_message)
-            auto_block_attacker_ip(client_ip, f"Do quet: {count} duong dan khong ton tai / {SCAN_WINDOW_S}s")
+            auto_block_attacker_ip(client_ip, f"Scan: {count} non-existent paths / {SCAN_WINDOW_S}s")
+
+    elif event_type == "MFA_FAILED":
+        # Dem theo IP; dung lan thu MFA_FAILED_THRESHOLD -> 1 canh bao CRITICAL + khoa 24h (khong bao lien tuc).
+        ip = _blockable_ip(client_ip) or str(client_ip)[:64]
+        if not table:
+            return
+        count = _count_or_skip(f"STATE#MFA_FAILED#{ip}", MFA_FAILED_WINDOW_S, "MFA")
+        if count == MFA_FAILED_THRESHOLD:
+            record_incident("MFA_BYPASS_ATTEMPT", "CRITICAL",
+                            {**data, "attempt_count": count, "window_seconds": MFA_FAILED_WINDOW_S}, raw_message)
+            auto_block_attacker_ip(client_ip, f"Wrong 2FA code: {count} times / {MFA_FAILED_WINDOW_S}s")
 
     elif event_type == "FAILED_LOGIN":
         ip = _blockable_ip(client_ip) or str(client_ip)[:64]
@@ -463,7 +481,7 @@ def evaluate_webapp_log(raw_message: str) -> None:
         if count == BRUTE_FORCE_THRESHOLD:
             record_incident("BRUTE_FORCE_DETECTED", "HIGH",
                             {**data, "attempt_count": count, "window_seconds": BRUTE_FORCE_WINDOW_S}, raw_message)
-            auto_block_attacker_ip(client_ip, f"Brute-force: {count} lan sai / {BRUTE_FORCE_WINDOW_S}s")
+            auto_block_attacker_ip(client_ip, f"Brute force: {count} failed logins / {BRUTE_FORCE_WINDOW_S}s")
         # IP da cham nguong thi da co canh bao rieng o tren: khong tinh tiep vao 2 bo dem THEO IP / TAI KHOAN,
         # de 1 IP don le khong sinh 2 canh bao cho cung 1 cuoc tan cong.
         if count < BRUTE_FORCE_THRESHOLD:
@@ -493,7 +511,7 @@ def _track_slow_brute_force(data: dict, ip: str, client_ip, raw_message: str) ->
     if count == SLOW_BRUTE_FORCE_THRESHOLD:
         record_incident("SLOW_BRUTE_FORCE", "HIGH",
                         {**data, "attempt_count": count, "window_seconds": SLOW_BRUTE_FORCE_WINDOW_S}, raw_message)
-        auto_block_attacker_ip(client_ip, f"Brute-force cham: {count} lan sai / {SLOW_BRUTE_FORCE_WINDOW_S}s")
+        auto_block_attacker_ip(client_ip, f"Slow brute force: {count} failed logins / {SLOW_BRUTE_FORCE_WINDOW_S}s")
 
 
 def _track_account_under_attack(data: dict, raw_message: str) -> None:

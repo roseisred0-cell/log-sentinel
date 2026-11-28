@@ -46,6 +46,7 @@ from markupsafe import Markup
 
 import admin_governance as governance_mod
 import chat_assistant
+import cloud_health
 import cognito_identity as cognito
 import governance_lambda
 import incident_stats
@@ -73,10 +74,24 @@ class AppConfig:
     chat_model: str = ""
     chat_secret_id: str = ""
     chat_daily_limit: int = 30
+    # The System Health (chi Admin): doc alarm + metric Lambda tu CloudWatch. Rong = tat.
+    health_alarm_prefix: str = ""
+    health_functions: dict = None
+    health_dashboard: str = ""
 
 
 _REQUIRED_ENV = ("APP_ADMIN_PASSWORD", "APP_TOTP_SECRET", "APP_SETUP_TOKEN", "APP_SESSION_SECRET",
                  "INCIDENT_TABLE")
+
+
+def _parse_functions(raw: str) -> dict:
+    """'Detector=fn-a,Governance=fn-b' -> {'Detector': 'fn-a', 'Governance': 'fn-b'}."""
+    out = {}
+    for part in (raw or "").split(","):
+        label, _, name = part.partition("=")
+        if label.strip() and name.strip():
+            out[label.strip()] = name.strip()
+    return out
 
 
 def load_config_from_env(env: Mapping[str, str] = os.environ) -> AppConfig:
@@ -109,6 +124,9 @@ def load_config_from_env(env: Mapping[str, str] = os.environ) -> AppConfig:
         chat_model=env.get("CHAT_MODEL", "").strip(),
         chat_secret_id=env.get("CHAT_SECRET_ID", "").strip(),
         chat_daily_limit=int(env.get("CHAT_DAILY_LIMIT", "30") or 30),
+        health_alarm_prefix=env.get("HEALTH_ALARM_PREFIX", "").strip(),
+        health_functions=_parse_functions(env.get("HEALTH_FUNCTIONS", "")),
+        health_dashboard=env.get("HEALTH_DASHBOARD", "").strip(),
     )
 
 
@@ -394,10 +412,10 @@ def is_malicious_query(query: str) -> bool:
 _SETUP_TEMPLATE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>LogSentinel 2FA Setup</title></head>
 <body style="font-family: Arial, sans-serif; text-align: center; padding-top: 40px;">
-  <h2>Thiet lap xac thuc 2 yeu to (TOTP)</h2>
+  <h2>Set up two-factor authentication (TOTP)</h2>
   {% if qr_svg %}<div style="width:220px;margin:auto">{{ qr_svg }}</div>{% endif %}
-  <p>Ma khoa thu cong: <code><b>{{ secret }}</b></code></p>
-  <p style="color:#a00">Trang nay chua bi mat. Dong tab sau khi quet ma.</p>
+  <p>Manual key: <code><b>{{ secret }}</b></code></p>
+  <p style="color:#a00">This page contains a secret. Close the tab after scanning the code.</p>
 </body></html>"""
 
 
@@ -432,6 +450,7 @@ SESSION_MINUTES = 30
 SESSION_ABSOLUTE_SECONDS = {"cognito": SESSION_MINUTES * 60, "local": 8 * 3600}
 MFA_CHALLENGE_SECONDS = 170  # Cognito giu phien thu thach MFA 3 phut
 LOCAL_BRUTE_FORCE_THRESHOLD = 5  # phai bang BRUTE_FORCE_THRESHOLD trong lambda_src/detector.py
+LOCAL_MFA_THRESHOLD = 5          # phai bang MFA_FAILED_THRESHOLD trong lambda_src/detector.py
 LOCAL_SCAN_THRESHOLD = 30        # phai bang SCAN_THRESHOLD trong lambda_src/detector.py
 _EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,250}\.[^@\s.]{2,}$")
 _ADMIN_ROLES = ("admin",)
@@ -557,7 +576,7 @@ def _clean_email(value) -> Optional[str]:
 
 def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList] = None,
                store=None, identity=None, clock: Callable[[], float] = time.time,
-               governance_store=None, executor=None, chat=None) -> Flask:
+               governance_store=None, executor=None, chat=None, system_health=None) -> Flask:
     config = config or load_config_from_env()
     blocklist = blocklist or BlockList(dynamodb_lookup(config.incident_table, config.region))
     store = store or DynamoIncidentStore(config.incident_table, config.region)
@@ -576,6 +595,9 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
                                           key_loader=lambda: _read_secret(config.chat_secret_id, config.region)),
             chat_assistant.DynamoChatQuota(config.incident_table, config.region),
             knowledge=chat_assistant.load_knowledge(), daily_limit=config.chat_daily_limit)
+    if system_health is None and config.health_alarm_prefix:
+        system_health = cloud_health.CloudHealth(None, config.health_alarm_prefix, config.health_functions or {},
+                                          config.region, config.health_dashboard)
     totp = pyotp.TOTP(config.totp_secret)
     logger = _security_logger(config.log_path)
     revocations = SessionRevocations(store, clock=clock)
@@ -586,6 +608,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
     # Lan sai thu LOCAL_BRUTE_FORCE_THRESHOLD trong 60s -> chan tai cho (cung nguong voi Detector).
     fail_tracker = RateLimiter(limit=LOCAL_BRUTE_FORCE_THRESHOLD - 1, window=60, clock=clock)
     scan_tracker = RateLimiter(limit=LOCAL_SCAN_THRESHOLD - 1, window=60, clock=clock)
+    otp_tracker = RateLimiter(limit=LOCAL_MFA_THRESHOLD - 1, window=60, clock=clock)   # sai ma OTP
 
     app = Flask(__name__)
     app.secret_key = config.session_secret
@@ -609,6 +632,12 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
             principal = f"{session.get('auth', 'local')}:{session['user']}"
             if not sid or clock() - login_at > limit or revocations.is_revoked(sid) \
                     or revocations.user_revoked_at(principal) >= login_at:  # vai tro vua doi / bi vo hieu hoa
+                session.clear()
+                return jsonify({"error": "Unauthorized"}), 401
+            # Doi IP -> ve man hinh dang nhap (cookie bi danh cap dung tu may khac cung bi chan).
+            if session.get("login_ip") != g.client_ip:
+                write_security_log("SESSION_IP_CHANGED", 401, username=session["user"],
+                                   login_ip=session.get("login_ip"))
                 session.clear()
                 return jsonify({"error": "Unauthorized"}), 401
             return view(*args, **kwargs)
@@ -681,12 +710,20 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
         if not fail_tracker.allow(g.client_ip):
             blocklist.block_locally(g.client_ip)
 
+    def mfa_failed(**details) -> None:
+        """Mat khau dung + OTP sai. Go nham ma Authenticator la chuyen thuong nen moi lan chi ghi MFA_FAILED;
+        lan sai thu LOCAL_MFA_THRESHOLD trong 60s moi chan tai cho. Detector dem MFA_FAILED (dung chung moi worker)
+        va dung lan thu 5 thi ghi MFA_BYPASS_ATTEMPT (CRITICAL) + khoa 24h. Khong bao gio ghi lai ma OTP."""
+        write_security_log("MFA_FAILED", 403, **details)
+        if not otp_tracker.allow(g.client_ip):
+            blocklist.block_locally(g.client_ip)
+
     def reject_injection(value: str, field: str):
         """Payload SQLi/path traversal dat o o dang nhap cung la tan cong, khong chi o o tim kiem."""
         if not is_malicious_query(value):
             return None
         critical("SQL_INJECTION", payload=value[:512], field=field)
-        return jsonify({"error": "Forbidden - Phat hien payload doc hai"}), 403
+        return jsonify({"error": "Forbidden - malicious payload detected"}), 403
 
     @app.before_request
     def enforce_soar_defense():
@@ -694,7 +731,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
         if blocklist.is_blocked(g.client_ip):
             return jsonify({
                 "error": "Access Denied by SOAR Active Defense",
-                "message": f"Dia chi IP {g.client_ip} da bi LogSentinel tu dong khoa.",
+                "message": f"IP address {g.client_ip} has been blocked automatically by LogSentinel.",
             }), 403
 
     @app.errorhandler(404)
@@ -746,12 +783,11 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
 
         if not otp_code:
             write_security_log("MFA_REQUIRED", 403, username=user, reason="Missing 2FA OTP code")
-            return jsonify({"error": "MFA Required - Vui long cung cap ma OTP 6 so"}), 403
+            return jsonify({"error": "MFA required - please provide the 6-digit OTP code"}), 403
 
         if not totp.verify(otp_code, valid_window=1):
-            # Mat khau dung + OTP sai = mat khau da bi lo -> CRITICAL. Khong ghi lai ma OTP.
-            critical("MFA_BYPASS_ATTEMPT", username=user, otp_length=len(otp_code))
-            return jsonify({"error": "Forbidden - Ma 2FA OTP khong hop le!"}), 403
+            mfa_failed(username=user, otp_length=len(otp_code))
+            return jsonify({"error": "Forbidden - invalid 2FA OTP code"}), 403
 
         session.clear()  # chong session fixation
         session.permanent = True
@@ -760,6 +796,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
         session["role"] = "admin"
         session["sid"] = secrets.token_urlsafe(16)
         session["login_at"] = clock()
+        session["login_ip"] = g.client_ip  # phien gan voi IP luc dang nhap (require_session)
         session["csrf"] = secrets.token_urlsafe(32)
         write_security_log("LOGIN_SUCCESS", 200, username=user, mfa_verified=True, auth="local")
         return jsonify({"message": "Dang nhap thanh cong voi bao mat 2FA!"}), 200
@@ -778,6 +815,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
         session["access_token"] = result.access_token
         session["sid"] = secrets.token_urlsafe(16)
         session["login_at"] = clock()
+        session["login_ip"] = g.client_ip  # phien gan voi IP luc dang nhap (require_session)
         session["csrf"] = secrets.token_urlsafe(32)
         # Admin bat buoc 2FA. Admin da bat 2FA luon di qua buoc OTP (mfa_verified=True).
         session["mfa_setup_required"] = result.role in _ADMIN_ROLES and not mfa_verified
@@ -934,8 +972,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
         try:
             result = identity.complete_mfa(pending["session"], pending["username"], code)
         except cognito.CodeInvalid:
-            # Mat khau dung + OTP sai = mat khau da bi lo -> CRITICAL, giong tai khoan admin noi bo.
-            critical("MFA_BYPASS_ATTEMPT", username=pending["email"], otp_length=len(code))
+            mfa_failed(username=pending["email"], otp_length=len(code))
             return jsonify({"error": "invalid_otp"}), 403
         except cognito.AuthFailed:
             session.clear()
@@ -1246,7 +1283,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
             blocks = [_block_view(b) for b in store.active_blocks(time.time())]
         except Exception as exc:
             print(f"[ERROR] Console doc du lieu loi: {type(exc).__name__}", flush=True)
-            return jsonify({"error": "Không đọc được dữ liệu sự cố."}), 502
+            return jsonify({"error": "Could not read incident data."}), 502
         return jsonify({"incidents": incidents, "blocks": blocks, "server_time": int(time.time())}), 200
 
     # khoang -> (so o, do dai o, so su co doc toi da, giay luu ket qua). 7/30 ngay doc nhieu hon nen luu 5 phut:
@@ -1264,7 +1301,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
         except ValueError:
             tz = None
         if rng not in STATS_RANGES or tz is None or not -720 <= tz <= 840:
-            return jsonify({"error": "Khoảng thời gian hoặc múi giờ không hợp lệ."}), 400
+            return jsonify({"error": "Invalid time range or time zone."}), 400
         slots, slot_seconds, limit, ttl = STATS_RANGES[rng]
         now = clock()
         with stats_lock:
@@ -1276,7 +1313,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
             items = store.incidents_since(since, limit)
         except Exception as exc:
             print(f"[ERROR] Thong ke doc du lieu loi: {type(exc).__name__}", flush=True)
-            return jsonify({"error": "Không đọc được dữ liệu sự cố."}), 502
+            return jsonify({"error": "Could not read incident data."}), 502
         summary = incident_stats.summarize(items, now, slots=slots, slot_seconds=slot_seconds, tz_minutes=tz)
         summary.update(range=rng, limit=limit, truncated=len(items) >= limit)
         if ttl:
@@ -1286,6 +1323,26 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
                 stats_cache[(rng, tz)] = (now + ttl, summary)
         return jsonify(summary), 200
 
+    @app.get("/api/health")
+    @require_session
+    @require_role(*_ADMIN_ROLES)
+    def api_health():
+        """Thong tin van hanh (alarm, loi Lambda): chi Admin. Doc CloudWatch qua role EC2, co cache."""
+        if system_health is None:
+            return jsonify({"error": "Not Found"}), 404
+        try:
+            tz = int(request.args.get("tz", "0"))
+        except ValueError:
+            tz = None
+        rng = request.args.get("range", "24h")
+        if rng not in cloud_health.RANGES or tz is None or not -720 <= tz <= 840:
+            return jsonify({"error": "Invalid time range or time zone."}), 400
+        try:
+            return jsonify(system_health.summary(rng, tz)), 200
+        except Exception as exc:
+            print(f"[ERROR] Doc CloudWatch loi: {type(exc).__name__}", flush=True)
+            return jsonify({"error": "Could not read CloudWatch."}), 502
+
     @app.post("/api/unblock")
     @require_session
     @require_csrf
@@ -1293,8 +1350,8 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
     def api_unblock():
         ip = _valid_ip(_json().get("ip", ""))  # _json(): body khong phai object (vd so, mang) -> {} thay vi 500
         if not ip:
-            return jsonify({"error": "IP khong hop le"}), 400
-        return _unblock(ip, "Go khoa that bai")
+            return jsonify({"error": "Invalid IP address"}), 400
+        return _unblock(ip, "Unblock failed")
 
     @app.post("/api/chat")
     @require_session
@@ -1309,12 +1366,12 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
             recent = [_incident_view(i) for i in store.recent_incidents(50)]
         except Exception as exc:
             print(f"[ERROR] Chat doc su co loi: {type(exc).__name__}", flush=True)
-            return jsonify({"error": "Không đọc được dữ liệu sự cố."}), 502
+            return jsonify({"error": "Could not read incident data."}), 502
         if incident_id is not None:
             # Chi su co nguoi dung von xem duoc trong Console (50 su co gan nhat)
             recent = [i for i in recent if i["id"] == incident_id]
             if not recent:
-                return jsonify({"error": "Không tìm thấy sự cố"}), 404
+                return jsonify({"error": "Incident not found"}), 404
         try:
             answer = chat.ask(_principal(), body.get("message"), incidents=recent)
         except chat_assistant.ChatError as exc:
@@ -1342,7 +1399,7 @@ def create_app(config: Optional[AppConfig] = None, blocklist: Optional[BlockList
         query = (request.args.get("q") or "")[:512]
         if is_malicious_query(query):
             critical("SQL_INJECTION", payload=query)
-            return jsonify({"error": "Forbidden - Phat hien payload doc hai"}), 403
-        return jsonify({"result": "Ket qua tim kiem an toan", "query": query}), 200
+            return jsonify({"error": "Forbidden - malicious payload detected"}), 403
+        return jsonify({"result": "Safe search result", "query": query}), 200
 
     return app
